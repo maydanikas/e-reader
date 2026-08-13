@@ -158,9 +158,118 @@ function parseBookHtml(htmlString: string): { chapters: Chapter[]; flatSentences
   return { chapters, flatSentences, flatParagraphs };
 }
 
+const STATE_KEY = 'bookvoice_state';
+const HTML_FALLBACK_KEY = 'bookvoice_html';
+const IDB_NAME = 'bookvoice';
+const IDB_STORE = 'kv';
+const BOOK_HTML_KEY = 'bookHtml';
+
+type PersistedState = {
+  currentIdx?: number;
+  rate?: number;
+  voiceName?: string;
+  isDemo?: boolean;
+  bookName?: string;
+};
+
+function idbOpen(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(IDB_STORE)) {
+        req.result.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbGet<T>(key: string): Promise<T | undefined> {
+  try {
+    const db = await idbOpen();
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+      req.onsuccess = () => resolve(req.result as T | undefined);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function idbSet(key: string, value: unknown): Promise<boolean> {
+  try {
+    const db = await idbOpen();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function idbDel(key: string): Promise<void> {
+  try {
+    const db = await idbOpen();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {}
+}
+
+function readPersistedState(): PersistedState {
+  try {
+    const raw = localStorage.getItem(STATE_KEY);
+    if (!raw) return {};
+    const data = JSON.parse(raw);
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function clampIdx(idx: number, total: number) {
+  if (!total) return 0;
+  return Math.min(Math.max(0, Math.floor(idx)), total - 1);
+}
+
+async function loadSavedBookHtml(): Promise<string | undefined> {
+  const fromIdb = await idbGet<string>(BOOK_HTML_KEY);
+  if (fromIdb && fromIdb.trim()) return fromIdb;
+  try {
+    const fallback = localStorage.getItem(HTML_FALLBACK_KEY);
+    if (fallback && fallback.trim()) return fallback;
+  } catch {}
+  return undefined;
+}
+
+async function saveBookHtml(html: string): Promise<boolean> {
+  const ok = await idbSet(BOOK_HTML_KEY, html);
+  if (ok) {
+    try { localStorage.removeItem(HTML_FALLBACK_KEY); } catch {}
+    return true;
+  }
+  try {
+    localStorage.setItem(HTML_FALLBACK_KEY, html);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
   const [bookData, setBookData] = useState<{ chapters: Chapter[]; flatSentences: Sentence[]; flatParagraphs: Paragraph[] }>(() => parseBookHtml(SAMPLE_HTML));
   const [isDemo, setIsDemo] = useState(true);
+  const [bookName, setBookName] = useState('');
+  const [hydrated, setHydrated] = useState(false);
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -182,6 +291,7 @@ export default function App() {
   const fileInputRef2 = useRef<HTMLInputElement>(null);
   const readerContainerRef = useRef<HTMLDivElement>(null);
   const toastTimerRef = useRef<any>(null);
+  const userLoadedRef = useRef(false);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -220,32 +330,59 @@ export default function App() {
     };
   }, [refreshVoices]);
 
-  // Persistence load
+  // Restore book + position before any writes
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('bookvoice_state');
-      if (raw) {
-        const data = JSON.parse(raw);
-        if (typeof data.rate === 'number') setRate(data.rate);
-        if (typeof data.voiceName === 'string') setSelectedVoiceName(data.voiceName);
-        if (typeof data.currentIdx === 'number') {
-          setCurrentIdx(data.currentIdx);
-          currentIdxRef.current = data.currentIdx;
-        }
+    let cancelled = false;
+    (async () => {
+      const data = readPersistedState();
+      if (typeof data.rate === 'number') setRate(data.rate);
+      if (typeof data.voiceName === 'string') setSelectedVoiceName(data.voiceName);
+
+      const html = await loadSavedBookHtml();
+      if (cancelled) return;
+      if (userLoadedRef.current) {
+        setHydrated(true);
+        return;
       }
-    } catch {}
+
+      if (html && data.isDemo === false) {
+        try {
+          const parsed = parseBookHtml(html);
+          if (parsed.flatSentences.length) {
+            setBookData(parsed);
+            setIsDemo(false);
+            if (typeof data.bookName === 'string') setBookName(data.bookName);
+            const idx = clampIdx(typeof data.currentIdx === 'number' ? data.currentIdx : 0, parsed.flatSentences.length);
+            setCurrentIdx(idx);
+            currentIdxRef.current = idx;
+            setHydrated(true);
+            return;
+          }
+        } catch {}
+      }
+
+      const demoTotal = parseBookHtml(SAMPLE_HTML).flatSentences.length;
+      const idx = clampIdx(typeof data.currentIdx === 'number' ? data.currentIdx : 0, demoTotal);
+      setCurrentIdx(idx);
+      currentIdxRef.current = idx;
+      setHydrated(true);
+    })();
+    return () => { cancelled = true; };
   }, []);
 
-  // Persistence save
+  // Persist position and settings after restore
   useEffect(() => {
+    if (!hydrated) return;
     try {
-      localStorage.setItem('bookvoice_state', JSON.stringify({
+      localStorage.setItem(STATE_KEY, JSON.stringify({
         currentIdx,
         rate,
         voiceName: selectedVoiceName,
-      }));
+        isDemo,
+        bookName,
+      } satisfies PersistedState));
     } catch {}
-  }, [currentIdx, rate, selectedVoiceName]);
+  }, [hydrated, currentIdx, rate, selectedVoiceName, isDemo, bookName]);
 
   // Wake lock
   const requestWakeLock = async () => {
@@ -467,14 +604,19 @@ export default function App() {
           showToast('Не удалось распарсить книгу - нет текста');
           return;
         }
+        userLoadedRef.current = true;
         setBookData(parsed);
         setCurrentIdx(0);
         currentIdxRef.current = 0;
         setIsDemo(false);
+        setBookName(file.name);
         stopSpeaking();
         setShowToc(false);
         showToast(`Загружено: ${parsed.chapters.length} глав, ${parsed.flatSentences.length} предложений`);
-        try { localStorage.setItem('bookvoice_has_book', '1'); } catch {}
+        void saveBookHtml(text).then((ok) => {
+          if (!ok) showToast('Книга открыта, но не сохранилась — после перезапуска загрузи её снова');
+        });
+        try { localStorage.removeItem('bookvoice_has_book'); } catch {}
       } catch (e) {
         console.error(e);
         showToast('Ошибка парсинга HTML');
@@ -660,7 +802,7 @@ export default function App() {
                 <UploadCloud className="text-[#ff6b35]" />
               </div>
               <div className="flex-1 text-center md:text-left">
-                <div className="sans font-bold text-[15px]">{isDemo ? 'Демо книга загружена — протестируй голос' : 'Книга загружена — можно читать'}</div>
+                <div className="sans font-bold text-[15px]">{isDemo ? 'Демо книга загружена — протестируй голос' : (bookName ? `Продолжаем: ${bookName}` : 'Книга загружена — можно читать')}</div>
                 <div className="sans text-[13px] text-[#8c7e6f] mt-1">Перетащи .html сюда или нажми загрузить. Парсим &lt;h1-h3&gt; и &lt;p&gt;. Поддерживаем data-page.</div>
                 <div className="mt-2 flex flex-wrap gap-2 justify-center md:justify-start">
                   {isDemo && <div className="inline-flex sans text-[11px] px-2 py-1 rounded-full bg-[#ff6b35]/10 text-[#ff6b35] font-bold">DEMO MODE</div>}
@@ -870,13 +1012,28 @@ export default function App() {
                   <li>Мы разбиваем параграф на предложения через Intl.Segmenter</li>
                   <li>Каждое предложение озвучивается по очереди через onend</li>
                   <li>Текущее предложение подсвечивается и скроллится smooth</li>
-                  <li>Позиция сохраняется в localStorage</li>
+                  <li>Книга и позиция сохраняются и восстанавливаются после перезапуска</li>
                   <li>При воспроизведении пробуем Wake Lock чтобы экран не гас</li>
                   <li>Работает offline, это PWA</li>
                 </ul>
               </div>
 
-              <button type="button" onClick={()=>{ try{ localStorage.clear(); }catch{}; setCurrentIdx(0); currentIdxRef.current=0; stopSpeaking(); setShowSettings(false); showToast('Прогресс сброшен'); }} className="w-full h-11 rounded-full bg-[#fdf8f0] border border-[#e7ddd0] sans text-[13px]">Сбросить прогресс</button>
+              <button type="button" onClick={()=>{
+                stopSpeaking();
+                try {
+                  localStorage.removeItem(STATE_KEY);
+                  localStorage.removeItem(HTML_FALLBACK_KEY);
+                  localStorage.removeItem('bookvoice_has_book');
+                } catch {}
+                void idbDel(BOOK_HTML_KEY);
+                setBookData(parseBookHtml(SAMPLE_HTML));
+                setIsDemo(true);
+                setBookName('');
+                setCurrentIdx(0);
+                currentIdxRef.current = 0;
+                setShowSettings(false);
+                showToast('Прогресс сброшен');
+              }} className="w-full h-11 rounded-full bg-[#fdf8f0] border border-[#e7ddd0] sans text-[13px]">Сбросить прогресс</button>
             </div>
           </div>
         </div>
