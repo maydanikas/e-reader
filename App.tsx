@@ -273,7 +273,10 @@ export default function App() {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [selectedVoiceName, setSelectedVoiceName] = useState<string>('');
+  const [selectedVoiceName, setSelectedVoiceName] = useState(() => {
+    const saved = readPersistedState().voiceName;
+    return typeof saved === 'string' ? saved : '';
+  });
   const [rate, setRate] = useState(1);
   const [showToc, setShowToc] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -292,11 +295,17 @@ export default function App() {
   const readerContainerRef = useRef<HTMLDivElement>(null);
   const toastTimerRef = useRef<any>(null);
   const userLoadedRef = useRef(false);
+  const preferredVoiceRef = useRef(selectedVoiceName);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToast(null), 3500);
+  }, []);
+
+  const chooseVoice = useCallback((name: string) => {
+    preferredVoiceRef.current = name;
+    setSelectedVoiceName(name);
   }, []);
 
   const refreshVoices = useCallback(() => {
@@ -305,14 +314,17 @@ export default function App() {
       const v = synth.getVoices() || [];
       if (v.length) {
         setVoices(v);
-        if (!selectedVoiceName) {
-          const ru = v.find(x => x.lang.toLowerCase().includes('ru-ru')) || v.find(x => x.lang.toLowerCase().includes('ru')) || v[0];
-          if (ru) setSelectedVoiceName(ru.name);
+        const preferred = preferredVoiceRef.current;
+        if (preferred) {
+          if (v.some(x => x.name === preferred)) setSelectedVoiceName(preferred);
+          return v;
         }
+        const ru = v.find(x => x.lang.toLowerCase().includes('ru-ru')) || v.find(x => x.lang.toLowerCase().includes('ru')) || v[0];
+        if (ru) chooseVoice(ru.name);
       }
       return v;
     } catch { return []; }
-  }, [selectedVoiceName]);
+  }, [chooseVoice]);
 
   // Load voices - initial + onvoiceschanged
   useEffect(() => {
@@ -336,7 +348,7 @@ export default function App() {
     (async () => {
       const data = readPersistedState();
       if (typeof data.rate === 'number') setRate(data.rate);
-      if (typeof data.voiceName === 'string') setSelectedVoiceName(data.voiceName);
+      if (typeof data.voiceName === 'string' && data.voiceName) chooseVoice(data.voiceName);
 
       const html = await loadSavedBookHtml();
       if (cancelled) return;
@@ -377,7 +389,7 @@ export default function App() {
       localStorage.setItem(STATE_KEY, JSON.stringify({
         currentIdx,
         rate,
-        voiceName: selectedVoiceName,
+        voiceName: selectedVoiceName || preferredVoiceRef.current,
         isDemo,
         bookName,
       } satisfies PersistedState));
@@ -982,8 +994,11 @@ export default function App() {
             <div className="space-y-6">
               <div>
                 <div className="sans text-[12px] font-bold tracking-widest text-[#8c7e6f] mb-2">ГОЛОС • загружено: {voices.length}</div>
-                <select value={selectedVoiceName} onChange={e=>setSelectedVoiceName(e.target.value)} className="w-full h-12 rounded-xl bg-[#fdf8f0] border border-[#e7ddd0] px-3 sans text-[14px]">
+                <select value={selectedVoiceName} onChange={e=>chooseVoice(e.target.value)} className="w-full h-12 rounded-xl bg-[#fdf8f0] border border-[#e7ddd0] px-3 sans text-[14px]">
                   {groupedVoices.length===0 && <option>Загрузка голосов...</option>}
+                  {selectedVoiceName && !groupedVoices.some(v => v.name === selectedVoiceName) && (
+                    <option value={selectedVoiceName}>{selectedVoiceName} — сохранённый</option>
+                  )}
                   {groupedVoices.map(v=>(
                     <option key={v.name+v.lang} value={v.name}>{v.name} — {v.lang} {v.default ? '(default)' : ''}</option>
                   ))}
