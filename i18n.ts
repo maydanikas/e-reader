@@ -1,4 +1,4 @@
-export type Locale = 'ru' | 'en' | 'nl' | 'de' | 'es' | 'fr';
+export type Locale = 'ru' | 'uk' | 'en' | 'nl' | 'de' | 'es' | 'fr';
 export type MsgKey = keyof typeof ru;
 
 const ru = {
@@ -493,15 +493,98 @@ const fr: { [K in MsgKey]: string } = {
   manifestName: 'BookVoice — lecteur PWA pour votre HTML',
 };
 
-const dictionaries: Record<Locale, Record<MsgKey, string>> = { ru, en, nl, de, es, fr };
+const uk: { [K in MsgKey]: string } = {
+  untitled: 'Початок',
+  partN: 'Частина {n}',
+  unnamedBook: 'Книга.html',
+  voicesLoadingRetry: 'Голоси завантажуються... повтор через 0.5с',
+  endOfBook: 'Кінець книги',
+  ttsError: 'Помилка озвучення: {err}',
+  ttsStartFailed: 'Не вдалося запустити озвучення',
+  loadBookFirst: 'Спочатку завантаж книгу',
+  openBookFailed: 'Не вдалося відкрити книгу',
+  bookHasNoText: 'У книзі немає тексту',
+  htmlParseError: 'Помилка розбору HTML',
+  noFileSelected: 'Файл не вибрано',
+  skippedFile: 'Пропущено файл: {name}',
+  convertError: 'Не вдалося розібрати: {name} ({reason})',
+  pageN: 'Сторінка {n}',
+  readError: 'Помилка читання: {name}',
+  emptyFile: 'Файл порожній: {name}',
+  parseErrorFile: 'Помилка розбору: {name}',
+  noTextFile: 'Немає тексту: {name}',
+  saveFailed: 'Не вдалося зберегти: {name}',
+  bookUpdated: 'Оновлено: {name}. Місце читання збережено.',
+  bookAdded: 'У бібліотеці: {name} — {chapters} розд., {sentences} реч.',
+  libraryNoNew: 'без нових',
+  libraryNew: '+{n} нових',
+  libraryUpdated: ', {n} оновлено',
+  libraryBatch: 'Бібліотека: {summary}',
+  openedBook: 'Відкрито: {name}',
+  bookDeleted: 'Книгу видалено',
+  bookRemovedFromLibrary: 'Книгу видалено з бібліотеки',
+  dropHtml: 'Перетягніть HTML, EPUB, PDF або FB2',
+  subtitle: 'PWA плеєр для твого html • {n} голосів',
+  toc: 'Зміст',
+  tocCaps: 'ЗМІСТ',
+  install: 'Встановити',
+  totalSentences: 'Усього речень',
+  voicesLoaded: 'голосів завантажено: {n}',
+  uploadToStart: 'Завантаж книгу, щоб почати',
+  nowReading: 'Зараз: {name}',
+  bookReady: 'Книгу завантажено — можна читати',
+  uploadHint: 'Перетягни HTML, EPUB, PDF або FB2. Файл із тією самою назвою оновить книгу й збереже місце читання.',
+  voicesChip: 'голосів: {n} • {lang}',
+  loading: 'завантаження',
+  uploadBooks: 'Завантажити книги',
+  orChooseFiles: 'або вибрати файли',
+  libraryCaps: 'БІБЛІОТЕКА • {n}',
+  libraryMeta: '{chapters} розд. • {current} / {total} реч.',
+  deleteBook: 'Видалити {name}',
+  emptyReader: 'Завантаж книгу — текст з’явиться тут',
+  endOfBookFooter: 'Кінець книги • {n} речень • гортай вгору, щоб завантажити нову • voices: {voices}',
+  speed: 'Швидкість',
+  voicesCount: '{n} голосів',
+  uploadBooksShort: 'Завантажити книги',
+  installHomescreen: 'Встановити на головний екран',
+  voiceSettings: 'Налаштування голосу',
+  voiceLoaded: 'ГОЛОС • завантажено: {n}',
+  voicesLoading: 'Завантаження голосів...',
+  savedVoice: '{name} — збережений',
+  voiceHelp: 'Debug: voices count = {n}. Натисни Play, щоб викликати getVoices() після жесту. Порада: для української обери голос uk-UA. На iOS часто лише один якісний голос. На Android/Chrome список ширший.',
+  refreshVoices: 'Оновити список голосів',
+  voicesToast: 'Голосів: {n}',
+  speedCaps: 'ШВИДКІСТЬ',
+  slow: '0.5x повільно',
+  fast: '2x швидко',
+  howItWorks: 'Як це працює',
+  how1: 'Ми розбиваємо абзац на речення через Intl.Segmenter',
+  how2: 'Кожне речення озвучується по черзі через onend',
+  how3: 'Поточне речення підсвічується і прокручується smooth',
+  how4: 'Книги зберігаються в бібліотеці. Файл із тією самою назвою оновлює книгу й залишає місце читання',
+  how5: 'Під час відтворення пробуємо Wake Lock, щоб екран не гас',
+  how6: 'Працює офлайн, це PWA',
+  resetProgress: 'Скинути прогрес',
+  progressReset: 'Прогрес поточної книги скинуто',
+  installTitle: 'Встановити BookVoice',
+  installIos: 'iOS Safari: Натисни Поділитися → «На екран Дому».',
+  installAndroid: 'Android Chrome: Меню ⋮ → «Встановити застосунок».',
+  installDesktop: 'Desktop: іконка встановлення в адресному рядку.',
+  gotIt: 'Зрозуміло',
+  defaultVoice: '(за замовчуванням)',
+  manifestName: 'BookVoice — PWA плеєр для твого html',
+};
+
+const dictionaries: Record<Locale, Record<MsgKey, string>> = { ru, uk, en, nl, de, es, fr };
 
 export function detectLocale(): Locale {
   const lang = ((navigator.languages && navigator.languages[0]) || navigator.language || 'en').toLowerCase();
+  if (lang.startsWith('uk')) return 'uk';
   if (lang.startsWith('nl')) return 'nl';
   if (lang.startsWith('de')) return 'de';
   if (lang.startsWith('es')) return 'es';
   if (lang.startsWith('fr')) return 'fr';
-  if (lang.startsWith('ru') || lang.startsWith('uk') || lang.startsWith('be')) return 'ru';
+  if (lang.startsWith('ru') || lang.startsWith('be')) return 'ru';
   return 'en';
 }
 
