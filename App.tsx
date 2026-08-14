@@ -937,8 +937,8 @@ export default function App() {
         background_color: "#fdf8f0",
         theme_color: "#ff6b35",
         icons: [
-          { src: "/bookvoice-icon.png", sizes: "192x192", type: "image/png", purpose: "any" },
-          { src: "/bookvoice-icon.png", sizes: "512x512", type: "image/png", purpose: "any" }
+          { src: "/bookvoice-icon.png?v=2", sizes: "192x192", type: "image/png", purpose: "any maskable" },
+          { src: "/bookvoice-icon.png?v=2", sizes: "512x512", type: "image/png", purpose: "any maskable" }
         ]
       };
       const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
@@ -993,7 +993,7 @@ export default function App() {
               <Menu size={20} />
             </button>
             <div className="flex items-center gap-2.5">
-              <img src="/bookvoice-icon.png" alt="" className="w-9 h-9 rounded-[11px] shadow-[0_4px_12px_rgba(255,107,53,0.35)]" />
+              <img src="/bookvoice-icon.png?v=2" alt="" className="w-9 h-9 rounded-[11px] shadow-[0_4px_12px_rgba(255,107,53,0.35)]" />
               <div className="leading-tight">
                 <div className="sans font-bold text-[18px] tracking-[-0.02em]">BookVoice</div>
                 <div className="sans text-[11px] text-[#8c7e6f] tracking-wide -mt-[1px]">{t('subtitle', { n: voices.length })}</div>
