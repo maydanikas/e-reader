@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Rewind, Menu, X, Settings2, UploadCloud, BookOpen, Volume2, Smartphone, AlertCircle, Trash2 } from 'lucide-react';
 import { detectLocale, translate, type Locale, type MsgKey } from './i18n';
+import { fileToBookHtml, isSupportedBookFile } from './bookImport';
 
 // Types
 type Sentence = {
@@ -791,15 +792,17 @@ export default function App() {
     let last: { entry: LibraryEntry; replaced: boolean; parsed: ReturnType<typeof parseBookHtml>; keepIdx: number } | null = null;
 
     for (const file of htmlFiles) {
-      const lower = file.name.toLowerCase();
-      if (!lower.endsWith('.html') && !lower.endsWith('.htm')) {
+      if (!isSupportedBookFile(file.name)) {
         showToast(t('skippedFile', { name: file.name }));
+        continue;
       }
       let text = '';
       try {
-        text = await file.text();
-      } catch {
-        showToast(t('readError', { name: file.name }));
+        text = await fileToBookHtml(file);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'error';
+        console.error('[BookVoice] convert failed', file.name, err);
+        showToast(t('convertError', { name: file.name, reason }));
         continue;
       }
       if (!text || text.trim().length < 20) {
@@ -1086,9 +1089,9 @@ export default function App() {
                 <button type="button" onClick={()=>fileInputRef.current?.click()} className="sans md:hidden h-10 px-4 rounded-full bg-white border border-[#e7ddd0] text-[13px]">{t('orChooseFiles')}</button>
               </div>
               {/* Primary file input with proper id and label */}
-              <input id="book-file-input" ref={fileInputRef} type="file" accept=".html,.htm,text/html" multiple className="hidden" onChange={handleFileChange} />
+              <input id="book-file-input" ref={fileInputRef} type="file" accept=".html,.htm,.epub,.pdf,.fb2,.zip,text/html,application/epub+zip,application/pdf,application/x-fictionbook+xml,application/zip" multiple className="hidden" onChange={handleFileChange} />
               {/* Second hidden input for fallback */}
-              <input id="book-file-input-2" ref={fileInputRef2} type="file" accept=".html,.htm" multiple className="sr-only" tabIndex={-1} onChange={handleFileChange} />
+              <input id="book-file-input-2" ref={fileInputRef2} type="file" accept=".html,.htm,.epub,.pdf,.fb2,.zip" multiple className="sr-only" tabIndex={-1} onChange={handleFileChange} />
             </div>
             {library.length > 0 && (
               <div className="mt-4 rounded-[24px] bg-white border border-[#e7ddd0] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.04)]">
