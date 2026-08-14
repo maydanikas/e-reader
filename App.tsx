@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Rewind, Menu, X, Settings2, UploadCloud, BookOpen, Volume2, Smartphone, AlertCircle, Trash2 } from 'lucide-react';
+import { detectLocale, translate, type Locale, type MsgKey } from './i18n';
 
 // Types
 type Sentence = {
@@ -58,7 +59,7 @@ function parseBookHtml(htmlString: string): { chapters: Chapter[]; flatSentences
   let flatSentences: Sentence[] = [];
   let flatParagraphs: Paragraph[] = [];
 
-  const ensureChapter = (title = 'Начало', level = 1) => {
+  const ensureChapter = (title = translate(detectLocale(), 'untitled'), level = 1) => {
     if (!currentChapter) {
       currentChapter = { id: `ch-${chapters.length}`, title, level, paragraphs: [] };
       chapters.push(currentChapter);
@@ -132,7 +133,7 @@ function parseBookHtml(htmlString: string): { chapters: Chapter[]; flatSentences
       slice.forEach(p => p.sentences.forEach(s => { s.chapterIdx = chunkIdx; }));
       newChapters.push({
         id: `auto-${chunkIdx}`,
-        title: `Часть ${chunkIdx + 1}`,
+        title: translate(detectLocale(), 'partN', { n: chunkIdx + 1 }),
         level: 2,
         paragraphs: slice,
       });
@@ -362,6 +363,9 @@ export default function App() {
   const [installPrompt, setInstallPrompt] = useState<any>(null);
   const [showInstallHelp, setShowInstallHelp] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [locale, setLocale] = useState<Locale>(() => detectLocale());
+
+  const t = useCallback((key: MsgKey, vars?: Record<string, string | number>) => translate(locale, key, vars), [locale]);
 
   const synthRef = useRef<SpeechSynthesis | null>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
@@ -382,6 +386,16 @@ export default function App() {
     setToast(msg);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToast(null), 3500);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
+
+  useEffect(() => {
+    const onChange = () => setLocale(detectLocale());
+    window.addEventListener('languagechange', onChange);
+    return () => window.removeEventListener('languagechange', onChange);
   }, []);
 
   const chooseVoice = useCallback((name: string) => {
@@ -444,7 +458,7 @@ export default function App() {
           try {
             const parsed = parseBookHtml(html);
             if (parsed.flatSentences.length) {
-              const name = (typeof data.bookName === 'string' && data.bookName) ? data.bookName : 'Книга.html';
+              const name = (typeof data.bookName === 'string' && data.bookName) ? data.bookName : t('unnamedBook');
               const saved = await upsertStoredBook(name, html, parsed);
               if (saved) {
                 libraryEntries = [saved.entry];
@@ -564,7 +578,7 @@ export default function App() {
       setVoices(availableVoices);
     } else if (attempt === 0) {
       // first attempt with empty voices - retry in 500ms
-      showToast('Голоса загружаются... повтор через 0.5с');
+      showToast(t('voicesLoadingRetry'));
       setTimeout(() => speakAt(idx, 1), 500);
       return;
     }
@@ -605,14 +619,14 @@ export default function App() {
         setTimeout(() => speakAt(next, 0), 40);
       } else {
         stopSpeaking();
-        showToast('Конец книги');
+        showToast(t('endOfBook'));
       }
     };
     utter.onerror = (e: any) => {
       console.error('TTS error', e);
       const err = e?.error || 'unknown';
       if (err === 'canceled' || err === 'interrupted') return;
-      showToast(`Ошибка озвучки: ${err}`);
+      showToast(t('ttsError', { err }));
       if (isPlayingRef.current) {
         const next = idx + 1;
         if (next < sentences.length) {
@@ -630,14 +644,14 @@ export default function App() {
       synth.speak(utter);
     } catch (err) {
       console.error(err);
-      showToast('Не удалось запустить озвучку');
+      showToast(t('ttsStartFailed'));
       stopSpeaking();
     }
-  }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast]);
+  }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast, t]);
 
   const handlePlayPause = useCallback(async () => {
     if (!bookData.flatSentences.length) {
-      showToast('Сначала загрузи HTML книгу');
+      showToast(t('loadBookFirst'));
       return;
     }
     const synth = window.speechSynthesis;
@@ -678,7 +692,7 @@ export default function App() {
       speakAt(currentIdx, 0);
       requestWakeLock();
     }, 60);
-  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, showToast]);
+  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, showToast, t]);
 
   // Sync ref with state
   useEffect(() => { currentIdxRef.current = currentIdx; }, [currentIdx]);
@@ -735,13 +749,13 @@ export default function App() {
   const openStoredBook = useCallback(async (id: string, preferIdx?: number) => {
     const stored = await idbBookGet(id);
     if (!stored?.html) {
-      showToast('Не удалось открыть книгу');
+      showToast(t('openBookFailed'));
       return false;
     }
     try {
       const parsed = parseBookHtml(stored.html);
       if (!parsed.flatSentences.length) {
-        showToast('В книге нет текста');
+        showToast(t('bookHasNoText'));
         return false;
       }
       const idx = clampIdx(preferIdx ?? 0, parsed.flatSentences.length);
@@ -759,15 +773,15 @@ export default function App() {
       setShowToc(false);
       return true;
     } catch {
-      showToast('Ошибка парсинга HTML');
+      showToast(t('htmlParseError'));
       return false;
     }
-  }, [showToast, stopSpeaking]);
+  }, [showToast, stopSpeaking, t]);
 
   const loadHtmlFiles = useCallback(async (files: File[]) => {
     const htmlFiles = files.filter(Boolean);
     if (!htmlFiles.length) {
-      showToast('Файл не выбран');
+      showToast(t('noFileSelected'));
       return;
     }
     rememberCurrentProgress();
@@ -779,33 +793,33 @@ export default function App() {
     for (const file of htmlFiles) {
       const lower = file.name.toLowerCase();
       if (!lower.endsWith('.html') && !lower.endsWith('.htm')) {
-        showToast(`Пропущен файл: ${file.name}`);
+        showToast(t('skippedFile', { name: file.name }));
       }
       let text = '';
       try {
         text = await file.text();
       } catch {
-        showToast(`Ошибка чтения: ${file.name}`);
+        showToast(t('readError', { name: file.name }));
         continue;
       }
       if (!text || text.trim().length < 20) {
-        showToast(`Файл пустой: ${file.name}`);
+        showToast(t('emptyFile', { name: file.name }));
         continue;
       }
       let parsed: ReturnType<typeof parseBookHtml>;
       try {
         parsed = parseBookHtml(text);
       } catch {
-        showToast(`Ошибка парсинга: ${file.name}`);
+        showToast(t('parseErrorFile', { name: file.name }));
         continue;
       }
       if (!parsed.flatSentences.length) {
-        showToast(`Нет текста: ${file.name}`);
+        showToast(t('noTextFile', { name: file.name }));
         continue;
       }
       const saved = await upsertStoredBook(file.name, text, parsed);
       if (!saved) {
-        showToast(`Не удалось сохранить: ${file.name}`);
+        showToast(t('saveFailed', { name: file.name }));
         continue;
       }
       const isCurrent = saved.entry.id === activeBookIdRef.current && !isDemoRef.current;
@@ -837,12 +851,14 @@ export default function App() {
 
     if (htmlFiles.length === 1) {
       showToast(last.replaced
-        ? `Обновлено: ${last.entry.name}. Место чтения сохранено.`
-        : `В библиотеке: ${last.entry.name} — ${last.entry.chapterCount} гл., ${last.entry.sentenceCount} предл.`);
+        ? t('bookUpdated', { name: last.entry.name })
+        : t('bookAdded', { name: last.entry.name, chapters: last.entry.chapterCount, sentences: last.entry.sentenceCount }));
     } else {
-      showToast(`Библиотека: ${added ? `+${added} новых` : 'без новых'}${updated ? `, ${updated} обновлено` : ''}`);
+      const addedText = added ? t('libraryNew', { n: added }) : t('libraryNoNew');
+      const updatedText = updated ? t('libraryUpdated', { n: updated }) : '';
+      showToast(t('libraryBatch', { summary: `${addedText}${updatedText}` }));
     }
-  }, [rememberCurrentProgress, showToast, stopSpeaking]);
+  }, [rememberCurrentProgress, showToast, stopSpeaking, t]);
 
   const openLibraryBook = useCallback(async (id: string) => {
     if (id === activeBookIdRef.current && !isDemoRef.current) {
@@ -867,7 +883,7 @@ export default function App() {
       stopSpeaking();
       if (remaining[0]) {
         await openStoredBook(remaining[0].id, progressMapRef.current[remaining[0].id] ?? 0);
-        showToast(`Открыта: ${remaining[0].name}`);
+        showToast(t('openedBook', { name: remaining[0].name }));
       } else {
         setBookData(EMPTY_BOOK);
         setIsDemo(true);
@@ -877,12 +893,12 @@ export default function App() {
         activeBookIdRef.current = '';
         setCurrentIdx(0);
         currentIdxRef.current = 0;
-        showToast('Книга удалена');
+        showToast(t('bookDeleted'));
       }
     } else {
-      showToast('Книга удалена из библиотеки');
+      showToast(t('bookRemovedFromLibrary'));
     }
-  }, [openStoredBook, showToast, stopSpeaking]);
+  }, [openStoredBook, showToast, stopSpeaking, t]);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const list = e.target.files;
@@ -895,7 +911,7 @@ export default function App() {
     setDragOver(false);
     const list = e.dataTransfer.files;
     if (list && list.length) void loadHtmlFiles(Array.from(list));
-    else showToast('Перетащите .html файл');
+    else showToast(t('dropHtml'));
   };
 
   const total = bookData.flatSentences.length;
@@ -911,7 +927,7 @@ export default function App() {
     // Manifest
     try {
       const manifest = {
-        name: "BookVoice - PWA плеер для твоего html",
+        name: t('manifestName'),
         short_name: "BookVoice",
         start_url: ".",
         display: "standalone",
@@ -946,7 +962,7 @@ export default function App() {
         navigator.serviceWorker.register(swUrl).catch(()=>{});
       } catch {}
     }
-  }, []);
+  }, [t]);
 
   const groupedVoices = useMemo(() => {
     const ru = voices.filter(v => v.lang.toLowerCase().startsWith('ru'));
@@ -977,19 +993,19 @@ export default function App() {
               <img src="/bookvoice-icon.png" alt="" className="w-9 h-9 rounded-[11px] shadow-[0_4px_12px_rgba(255,107,53,0.35)]" />
               <div className="leading-tight">
                 <div className="sans font-bold text-[18px] tracking-[-0.02em]">BookVoice</div>
-                <div className="sans text-[11px] text-[#8c7e6f] tracking-wide -mt-[1px]">PWA плеер для твоего html • {voices.length} голосов</div>
+                <div className="sans text-[11px] text-[#8c7e6f] tracking-wide -mt-[1px]">{t('subtitle', { n: voices.length })}</div>
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
             <button type="button" onClick={()=>setShowToc(true)} className="hidden md:flex sans h-9 px-3.5 rounded-full bg-white border border-[#e7ddd0] text-[13px] font-medium items-center gap-2 hover:bg-[#fff7ef] transition">
-              <BookOpen size={16}/> Оглавление
+              <BookOpen size={16}/> {t('toc')}
             </button>
             <button type="button" onClick={()=>setShowSettings(v=>!v)} className="sans w-11 h-11 md:w-9 md:h-9 rounded-full bg-white border border-[#e7ddd0] flex items-center justify-center hover:bg-[#fff7ef] active:scale-95">
               <Settings2 size={18}/>
             </button>
             <button type="button" onClick={handleInstallClick} className="hidden sm:flex sans h-9 px-3.5 rounded-full bg-[#1a1a1a] text-white text-[13px] font-medium items-center gap-1.5 hover:bg-black active:scale-95">
-              <Smartphone size={14}/> Установить
+              <Smartphone size={14}/> {t('install')}
             </button>
           </div>
         </div>
@@ -1000,7 +1016,7 @@ export default function App() {
         {/* TOC desktop */}
         <aside className="hidden md:block w-[280px] shrink-0 sticky top-[64px] h-[calc(100dvh-64px-88px)] overflow-y-auto p-4 pr-2">
           <div className="rounded-[20px] bg-white border border-[#e7ddd0] shadow-[0_4px_20px_rgba(0,0,0,0.04)] p-3">
-            <div className="sans text-[11px] font-bold tracking-widest text-[#8c7e6f] px-2 py-2">ОГЛАВЛЕНИЕ</div>
+            <div className="sans text-[11px] font-bold tracking-widest text-[#8c7e6f] px-2 py-2">{t('tocCaps')}</div>
           <div className="space-y-1">
               {bookData.chapters.map((ch, idx) => (
                 <button
@@ -1036,9 +1052,9 @@ export default function App() {
               ))}
             </div>
             <div className="mt-3 p-3 rounded-xl bg-[#fdf8f0] border border-[#e7ddd0] sans">
-              <div className="text-[12px] text-[#8c7e6f]">Всего предложений</div>
+              <div className="text-[12px] text-[#8c7e6f]">{t('totalSentences')}</div>
               <div className="text-[20px] font-bold tracking-tight">{total}</div>
-              <div className="text-[11px] text-[#8c7e6f] mt-1">голосов загружено: {voices.length}</div>
+              <div className="text-[11px] text-[#8c7e6f] mt-1">{t('voicesLoaded', { n: voices.length })}</div>
             </div>
           </div>
         </aside>
@@ -1057,17 +1073,17 @@ export default function App() {
                 <UploadCloud className="text-[#ff6b35]" />
               </div>
               <div className="flex-1 text-center md:text-left">
-                <div className="sans font-bold text-[15px]">{isDemo ? 'Загрузи HTML книгу, чтобы начать' : (bookName ? `Сейчас: ${bookName}` : 'Книга загружена — можно читать')}</div>
-                <div className="sans text-[13px] text-[#8c7e6f] mt-1">Перетащи один или несколько .html. Файл с тем же именем обновит книгу и оставит место чтения.</div>
+                <div className="sans font-bold text-[15px]">{isDemo ? t('uploadToStart') : (bookName ? t('nowReading', { name: bookName }) : t('bookReady'))}</div>
+                <div className="sans text-[13px] text-[#8c7e6f] mt-1">{t('uploadHint')}</div>
                 <div className="mt-2 flex flex-wrap gap-2 justify-center md:justify-start">
-                  <div className="inline-flex sans text-[11px] px-2 py-1 rounded-full bg-[#1a1a1a] text-white/80">голосов: {voices.length} • {groupedVoices[0]?.lang || 'loading'}</div>
+                  <div className="inline-flex sans text-[11px] px-2 py-1 rounded-full bg-[#1a1a1a] text-white/80">{t('voicesChip', { n: voices.length, lang: groupedVoices[0]?.lang || t('loading') })}</div>
                 </div>
               </div>
               <div className="flex gap-2 w-full md:w-auto flex-col">
                 <label htmlFor="book-file-input" className="sans flex-1 md:flex-none h-11 px-5 rounded-full bg-[#1a1a1a] text-white text-[14px] font-medium hover:bg-black active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer">
-                  Загрузить HTML книги
+                  {t('uploadBooks')}
                 </label>
-                <button type="button" onClick={()=>fileInputRef.current?.click()} className="sans md:hidden h-10 px-4 rounded-full bg-white border border-[#e7ddd0] text-[13px]">или выбрать файлы</button>
+                <button type="button" onClick={()=>fileInputRef.current?.click()} className="sans md:hidden h-10 px-4 rounded-full bg-white border border-[#e7ddd0] text-[13px]">{t('orChooseFiles')}</button>
               </div>
               {/* Primary file input with proper id and label */}
               <input id="book-file-input" ref={fileInputRef} type="file" accept=".html,.htm,text/html" multiple className="hidden" onChange={handleFileChange} />
@@ -1076,7 +1092,7 @@ export default function App() {
             </div>
             {library.length > 0 && (
               <div className="mt-4 rounded-[24px] bg-white border border-[#e7ddd0] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.04)]">
-                <div className="sans text-[11px] font-bold tracking-widest text-[#8c7e6f] mb-3">БИБЛИОТЕКА • {library.length}</div>
+                <div className="sans text-[11px] font-bold tracking-widest text-[#8c7e6f] mb-3">{t('libraryCaps', { n: library.length })}</div>
                 <div className="space-y-1">
                   {library.map(book => {
                     const active = book.id === activeBookId && !isDemo;
@@ -1089,14 +1105,14 @@ export default function App() {
                         <button type="button" onClick={()=>{ void openLibraryBook(book.id); }} className="flex-1 text-left min-w-0">
                           <div className="sans text-[14px] font-bold truncate">{book.name}</div>
                           <div className={`sans text-[11px] mt-[2px] ${active ? 'text-white/80' : 'text-[#8c7e6f]'}`}>
-                            {book.chapterCount} гл. • {Math.min(idx + 1, book.sentenceCount)} / {book.sentenceCount} предл.
+                            {t('libraryMeta', { chapters: book.chapterCount, current: Math.min(idx + 1, book.sentenceCount), total: book.sentenceCount })}
                           </div>
                         </button>
                         <button
                           type="button"
                           onClick={()=>{ void deleteLibraryBook(book.id); }}
                           className={`w-10 h-10 rounded-full grid place-items-center shrink-0 ${active ? 'bg-white/15 hover:bg-white/25' : 'bg-[#fdf8f0] border border-[#e7ddd0] hover:bg-white'}`}
-                          aria-label={`Удалить ${book.name}`}
+                          aria-label={t('deleteBook', { name: book.name })}
                         >
                           <Trash2 size={16}/>
                         </button>
@@ -1112,7 +1128,7 @@ export default function App() {
           <div className="px-5 md:px-8">
             <div className="mx-auto max-w-[700px]">
               {bookData.chapters.length === 0 ? (
-                <div className="serif text-[16px] text-[#8c7e6f] text-center py-16 leading-[1.6]">Загрузи HTML книгу — текст появится здесь</div>
+                <div className="serif text-[16px] text-[#8c7e6f] text-center py-16 leading-[1.6]">{t('emptyReader')}</div>
               ) : (
                 <>
               {bookData.chapters.map((ch, chIdx) => (
@@ -1147,7 +1163,7 @@ export default function App() {
                   </div>
                 </div>
               ))}
-              <div className="serif text-[14px] text-[#8c7e6f] text-center py-12">Конец книги • {total} предложений • листай вверх для загрузки новой • voices: {voices.length}</div>
+              <div className="serif text-[14px] text-[#8c7e6f] text-center py-12">{t('endOfBookFooter', { n: total, voices: voices.length })}</div>
                 </>
               )}
             </div>
@@ -1197,7 +1213,7 @@ export default function App() {
               </button>
 
               <div className="hidden md:flex items-center gap-3 ml-2 pl-4 border-l border-white/10">
-                <div className="sans text-[12px] text-white/60 leading-none">Скорость</div>
+                <div className="sans text-[12px] text-white/60 leading-none">{t('speed')}</div>
                 <div className="flex gap-1">
                   {speedOptions.map(sp => (
                     <button type="button" key={sp} onClick={()=>setRate(sp)} className={`sans h-8 px-2.5 rounded-full text-[12px] font-bold transition ${rate===sp ? 'bg-white text-black' : 'bg-white/10 text-white/80 hover:bg-white/15'}`}>{sp}x</button>
@@ -1221,7 +1237,7 @@ export default function App() {
             </div>
             {/* mobile extra progress label */}
             <div className="md:hidden px-4 pb-3 -mt-1 flex items-center justify-between gap-3">
-              <div className="sans text-[11px] text-white/40 truncate max-w-[60%]">{bookData.chapters[currentChapterIdx]?.title} • {voices.length} голосов</div>
+              <div className="sans text-[11px] text-white/40 truncate max-w-[60%]">{bookData.chapters[currentChapterIdx]?.title} • {t('voicesCount', { n: voices.length })}</div>
               <div className="sans text-[11px] text-white/40 shrink-0">{Math.round(progress)}%</div>
             </div>
           </div>
@@ -1234,7 +1250,7 @@ export default function App() {
           <div className="flex-1 bg-black/40 backdrop-blur-sm" onClick={()=>setShowToc(false)} />
           <div className="w-[88%] max-w-[360px] bg-[#fdf8f0] h-full shadow-2xl border-l border-[#e7ddd0] flex flex-col animate-[slideIn_0.25s_ease]">
             <div className="h-[64px] px-5 flex items-center justify-between border-b border-[#e7ddd0]">
-              <div className="sans font-bold">Оглавление</div>
+              <div className="sans font-bold">{t('toc')}</div>
               <button type="button" onClick={()=>setShowToc(false)} className="w-9 h-9 rounded-full bg-white border border-[#e7ddd0] grid place-items-center"><X size={18}/></button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
@@ -1254,8 +1270,8 @@ export default function App() {
               ))}
             </div>
             <div className="p-4 border-t border-[#e7ddd0] space-y-3">
-              <label htmlFor="book-file-input" className="w-full h-12 rounded-full bg-[#ff6b35] text-white sans font-medium flex items-center justify-center cursor-pointer">Загрузить книги</label>
-              <button type="button" onClick={handleInstallClick} className="w-full h-12 rounded-full bg-white border border-[#e7ddd0] sans text-[13px] flex items-center justify-center gap-2"><Smartphone size={16}/> Установить на главный экран</button>
+              <label htmlFor="book-file-input" className="w-full h-12 rounded-full bg-[#ff6b35] text-white sans font-medium flex items-center justify-center cursor-pointer">{t('uploadBooksShort')}</label>
+              <button type="button" onClick={handleInstallClick} className="w-full h-12 rounded-full bg-white border border-[#e7ddd0] sans text-[13px] flex items-center justify-center gap-2"><Smartphone size={16}/> {t('installHomescreen')}</button>
             </div>
           </div>
         </div>
@@ -1267,33 +1283,33 @@ export default function App() {
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={()=>setShowSettings(false)} />
           <div className="relative w-full md:max-w-[440px] bg-white rounded-t-[28px] md:rounded-[28px] shadow-2xl border border-[#e7ddd0] p-6 max-h-[85dvh] overflow-y-auto">
             <div className="flex items-center justify-between mb-5">
-              <div className="flex items-center gap-2"><Volume2 size={18}/><span className="sans font-bold">Настройки голоса</span></div>
+              <div className="flex items-center gap-2"><Volume2 size={18}/><span className="sans font-bold">{t('voiceSettings')}</span></div>
               <button type="button" onClick={()=>setShowSettings(false)} className="w-8 h-8 rounded-full bg-[#fdf8f0] border border-[#e7ddd0] grid place-items-center"><X size={16}/></button>
             </div>
 
             <div className="space-y-6">
               <div>
-                <div className="sans text-[12px] font-bold tracking-widest text-[#8c7e6f] mb-2">ГОЛОС • загружено: {voices.length}</div>
+                <div className="sans text-[12px] font-bold tracking-widest text-[#8c7e6f] mb-2">{t('voiceLoaded', { n: voices.length })}</div>
                 <select value={selectedVoiceName} onChange={e=>chooseVoice(e.target.value)} className="w-full h-12 rounded-xl bg-[#fdf8f0] border border-[#e7ddd0] px-3 sans text-[14px]">
-                  {groupedVoices.length===0 && <option>Загрузка голосов...</option>}
+                  {groupedVoices.length===0 && <option>{t('voicesLoading')}</option>}
                   {selectedVoiceName && !groupedVoices.some(v => v.name === selectedVoiceName) && (
-                    <option value={selectedVoiceName}>{selectedVoiceName} — сохранённый</option>
+                    <option value={selectedVoiceName}>{t('savedVoice', { name: selectedVoiceName })}</option>
                   )}
                   {groupedVoices.map(v=>(
-                    <option key={v.name+v.lang} value={v.name}>{v.name} — {v.lang} {v.default ? '(default)' : ''}</option>
+                    <option key={v.name+v.lang} value={v.name}>{v.name} — {v.lang} {v.default ? t('defaultVoice') : ''}</option>
                   ))}
                 </select>
-                <div className="sans text-[11px] text-[#8c7e6f] mt-2">Debug: voices count = {voices.length}. Нажми Play чтобы вызвать getVoices() после жеста. Совет: для русского выбери голос с ru-RU. На iOS доступен только один голос, но он качественный. На Android/Chrome список шире.</div>
-                <button type="button" onClick={()=>{ const vs=refreshVoices(); showToast(`Голосов: ${vs.length}`); }} className="mt-2 sans h-8 px-3 rounded-full bg-[#fdf8f0] border border-[#e7ddd0] text-[12px]">Обновить список голосов</button>
+                <div className="sans text-[11px] text-[#8c7e6f] mt-2">{t('voiceHelp', { n: voices.length })}</div>
+                <button type="button" onClick={()=>{ const vs=refreshVoices(); showToast(t('voicesToast', { n: vs.length })); }} className="mt-2 sans h-8 px-3 rounded-full bg-[#fdf8f0] border border-[#e7ddd0] text-[12px]">{t('refreshVoices')}</button>
               </div>
 
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <div className="sans text-[12px] font-bold tracking-widest text-[#8c7e6f]">СКОРОСТЬ</div>
+                  <div className="sans text-[12px] font-bold tracking-widest text-[#8c7e6f]">{t('speedCaps')}</div>
                   <div className="sans text-[13px] font-bold bg-[#1a1a1a] text-white px-2.5 py-1 rounded-full">{rate}x</div>
                 </div>
                 <input type="range" min={0.5} max={2} step={0.1} value={rate} onChange={e=>setRate(parseFloat(e.target.value))} className="w-full accent-[#ff6b35] h-2" />
-                <div className="flex justify-between sans text-[11px] text-[#8c7e6f] mt-1"><span>0.5x медленно</span><span>2x быстро</span></div>
+                <div className="flex justify-between sans text-[11px] text-[#8c7e6f] mt-1"><span>{t('slow')}</span><span>{t('fast')}</span></div>
                 <div className="flex gap-1 mt-3 flex-wrap">
                   {speedOptions.map(sp=>(
                     <button type="button" key={sp} onClick={()=>setRate(sp)} className={`sans h-8 px-3 rounded-full text-[12px] font-bold border ${rate===sp ? 'bg-[#ff6b35] text-white border-[#ff6b35]' : 'bg-white border-[#e7ddd0] text-[#3d3229]'}`}>{sp}x</button>
@@ -1302,14 +1318,14 @@ export default function App() {
               </div>
 
               <div className="rounded-xl bg-[#fdf8f0] border border-[#e7ddd0] p-4 sans">
-                <div className="text-[13px] font-bold mb-1">Как это работает</div>
+                <div className="text-[13px] font-bold mb-1">{t('howItWorks')}</div>
                 <ul className="text-[12px] text-[#6b5e52] space-y-1 list-disc pl-4">
-                  <li>Мы разбиваем параграф на предложения через Intl.Segmenter</li>
-                  <li>Каждое предложение озвучивается по очереди через onend</li>
-                  <li>Текущее предложение подсвечивается и скроллится smooth</li>
-                  <li>Книги хранятся в библиотеке. Файл с тем же именем обновляет книгу и оставляет место чтения</li>
-                  <li>При воспроизведении пробуем Wake Lock чтобы экран не гас</li>
-                  <li>Работает offline, это PWA</li>
+                  <li>{t('how1')}</li>
+                  <li>{t('how2')}</li>
+                  <li>{t('how3')}</li>
+                  <li>{t('how4')}</li>
+                  <li>{t('how5')}</li>
+                  <li>{t('how6')}</li>
                 </ul>
               </div>
 
@@ -1322,8 +1338,8 @@ export default function App() {
                   setProgressMap(prev => ({ ...prev, [activeBookId]: 0 }));
                 }
                 setShowSettings(false);
-                showToast('Прогресс текущей книги сброшен');
-              }} className="w-full h-11 rounded-full bg-[#fdf8f0] border border-[#e7ddd0] sans text-[13px]">Сбросить прогресс</button>
+                showToast(t('progressReset'));
+              }} className="w-full h-11 rounded-full bg-[#fdf8f0] border border-[#e7ddd0] sans text-[13px]">{t('resetProgress')}</button>
             </div>
           </div>
         </div>
@@ -1334,13 +1350,13 @@ export default function App() {
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={()=>setShowInstallHelp(false)} />
           <div className="relative bg-white rounded-[24px] max-w-[380px] w-full p-6 shadow-2xl border border-[#e7ddd0]">
-            <div className="sans font-bold text-[18px] mb-2">Установить BookVoice</div>
+            <div className="sans font-bold text-[18px] mb-2">{t('installTitle')}</div>
             <div className="sans text-[13px] text-[#6b5e52] leading-[1.5] space-y-2">
-              <p><b>iOS Safari:</b> Нажми Поделиться → «На экран Домой».</p>
-              <p><b>Android Chrome:</b> Меню ⋮ → «Установить приложение».</p>
-              <p><b>Desktop:</b> Иконка установки в адресной строке.</p>
+              <p>{t('installIos')}</p>
+              <p>{t('installAndroid')}</p>
+              <p>{t('installDesktop')}</p>
             </div>
-            <button type="button" onClick={()=>setShowInstallHelp(false)} className="mt-4 w-full h-11 rounded-full bg-[#1a1a1a] text-white sans font-medium">Понятно</button>
+            <button type="button" onClick={()=>setShowInstallHelp(false)} className="mt-4 w-full h-11 rounded-full bg-[#1a1a1a] text-white sans font-medium">{t('gotIt')}</button>
           </div>
         </div>
       )}
