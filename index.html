@@ -8,8 +8,10 @@
     <link rel="apple-touch-icon" href="/bookvoice-icon.png" />
     <script>
       (function () {
-        var langs = (navigator.languages || [navigator.language || 'en']).join(',').toLowerCase();
-        document.documentElement.lang = /(?:^|,)(ru|uk|be)/.test(langs) ? 'ru' : 'en';
+        var lang = ((navigator.languages && navigator.languages[0]) || navigator.language || 'en').toLowerCase();
+        var code = lang.split('-')[0];
+        var map = { nl: 'nl', de: 'de', es: 'es', fr: 'fr', ru: 'ru', uk: 'ru', be: 'ru' };
+        document.documentElement.lang = map[code] || 'en';
       })();
     </script>
   </head>
