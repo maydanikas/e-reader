@@ -926,7 +926,8 @@ export default function App() {
         background_color: "#fdf8f0",
         theme_color: "#ff6b35",
         icons: [
-          { src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23ff6b35'/><text x='50' y='65' font-size='50' text-anchor='middle' fill='white'>B</text></svg>", sizes: "192x192", type: "image/svg+xml" }
+          { src: "/bookvoice-icon.png", sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: "/bookvoice-icon.png", sizes: "512x512", type: "image/png", purpose: "any" }
         ]
       };
       const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
@@ -981,7 +982,7 @@ export default function App() {
               <Menu size={20} />
             </button>
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-[11px] bg-[#ff6b35] text-white grid place-items-center font-bold sans shadow-[0_4px_12px_rgba(255,107,53,0.35)]">B</div>
+              <img src="/bookvoice-icon.png" alt="" className="w-9 h-9 rounded-[11px] shadow-[0_4px_12px_rgba(255,107,53,0.35)]" />
               <div className="leading-tight">
                 <div className="sans font-bold text-[18px] tracking-[-0.02em]">BookVoice</div>
                 <div className="sans text-[11px] text-[#8c7e6f] tracking-wide -mt-[1px]">PWA плеер для твоего html • {voices.length} голосов</div>
