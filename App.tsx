@@ -24,17 +24,7 @@ type Chapter = {
   paragraphs: Paragraph[];
 };
 
-const SAMPLE_HTML = `
-<h1>Евгений Онегин — Отрывок для теста голоса</h1>
-<p>Мой дядя самых честных правил, когда не в шутку занемог, он уважать себя заставил и лучше выдумать не мог. Его пример другим наука; но, боже мой, какая скука с больным сидеть и день и ночь, не отходя ни шагу прочь!</p>
-<h2>Глава первая</h2>
-<p>Так думал молодой повеса, летя в пыли на почтовых, всевышней волею Зевеса наследник всех своих родных. Друзья Людмилы и Руслана! С героем моего романа без предисловий, сей же час позвольте познакомить вас.</p>
-<p>Онегин, добрый мой приятель, родился на брегах Невы, где, может быть, родились вы или блистали, мой читатель. Там некогда гулял и я: но вреден север для меня.</p>
-<p>Служив отлично-благородно, долгами жил его отец, давал три бала ежегодно и промотался наконец. Судьба Евгения хранила: сперва Madame за ним ходила, потом Monsieur ее сменил.</p>
-<h2>Глава вторая</h2>
-<p>Деревня, где скучал Евгений, была прелестный уголок. Там есть такой дремотный гений, товарищ барской праздности. В глуши, во мраке заточенья тянулись тихо дни мои без божества, без вдохновенья, без слез, без жизни, без любви.</p>
-<p>Я помню чудное мгновенье: передо мной явилась ты, как милое виденье, как гений чистой красоты. И сердце бьется в упоенье, и для него воскресли вновь и божество, и вдохновенье, и жизнь, и слезы, и любовь.</p>
-`;
+const EMPTY_BOOK = { chapters: [] as Chapter[], flatSentences: [] as Sentence[], flatParagraphs: [] as Paragraph[] };
 
 function splitIntoSentences(text: string): string[] {
   if (!text.trim()) return [];
@@ -152,7 +142,7 @@ function parseBookHtml(htmlString: string): { chapters: Chapter[]; flatSentences
   }
 
   if (flatParagraphs.length === 0) {
-    return parseBookHtml(SAMPLE_HTML);
+    return EMPTY_BOOK;
   }
 
   return { chapters, flatSentences, flatParagraphs };
@@ -351,7 +341,7 @@ async function upsertStoredBook(
 }
 
 export default function App() {
-  const [bookData, setBookData] = useState<{ chapters: Chapter[]; flatSentences: Sentence[]; flatParagraphs: Paragraph[] }>(() => parseBookHtml(SAMPLE_HTML));
+  const [bookData, setBookData] = useState<{ chapters: Chapter[]; flatSentences: Sentence[]; flatParagraphs: Paragraph[] }>(() => EMPTY_BOOK);
   const [isDemo, setIsDemo] = useState(true);
   const [bookName, setBookName] = useState('');
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
@@ -507,10 +497,8 @@ export default function App() {
         }
       }
 
-      const demoTotal = parseBookHtml(SAMPLE_HTML).flatSentences.length;
-      const idx = clampIdx(typeof data.currentIdx === 'number' && !activeId ? data.currentIdx : 0, demoTotal);
-      setCurrentIdx(idx);
-      currentIdxRef.current = idx;
+      setCurrentIdx(0);
+      currentIdxRef.current = 0;
       setHydrated(true);
     })();
     return () => { cancelled = true; };
@@ -648,6 +636,10 @@ export default function App() {
   }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast]);
 
   const handlePlayPause = useCallback(async () => {
+    if (!bookData.flatSentences.length) {
+      showToast('Сначала загрузи HTML книгу');
+      return;
+    }
     const synth = window.speechSynthesis;
     synthRef.current = synth;
     // MUST call getVoices after user gesture per spec
@@ -686,7 +678,7 @@ export default function App() {
       speakAt(currentIdx, 0);
       requestWakeLock();
     }, 60);
-  }, [currentIdx, speakAt, stopSpeaking]);
+  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, showToast]);
 
   // Sync ref with state
   useEffect(() => { currentIdxRef.current = currentIdx; }, [currentIdx]);
@@ -877,7 +869,7 @@ export default function App() {
         await openStoredBook(remaining[0].id, progressMapRef.current[remaining[0].id] ?? 0);
         showToast(`Открыта: ${remaining[0].name}`);
       } else {
-        setBookData(parseBookHtml(SAMPLE_HTML));
+        setBookData(EMPTY_BOOK);
         setIsDemo(true);
         isDemoRef.current = true;
         setBookName('');
@@ -1065,10 +1057,9 @@ export default function App() {
                 <UploadCloud className="text-[#ff6b35]" />
               </div>
               <div className="flex-1 text-center md:text-left">
-                <div className="sans font-bold text-[15px]">{isDemo ? 'Демо книга загружена — протестируй голос' : (bookName ? `Сейчас: ${bookName}` : 'Книга загружена — можно читать')}</div>
+                <div className="sans font-bold text-[15px]">{isDemo ? 'Загрузи HTML книгу, чтобы начать' : (bookName ? `Сейчас: ${bookName}` : 'Книга загружена — можно читать')}</div>
                 <div className="sans text-[13px] text-[#8c7e6f] mt-1">Перетащи один или несколько .html. Файл с тем же именем обновит книгу и оставит место чтения.</div>
                 <div className="mt-2 flex flex-wrap gap-2 justify-center md:justify-start">
-                  {isDemo && <div className="inline-flex sans text-[11px] px-2 py-1 rounded-full bg-[#ff6b35]/10 text-[#ff6b35] font-bold">DEMO MODE</div>}
                   <div className="inline-flex sans text-[11px] px-2 py-1 rounded-full bg-[#1a1a1a] text-white/80">голосов: {voices.length} • {groupedVoices[0]?.lang || 'loading'}</div>
                 </div>
               </div>
@@ -1120,6 +1111,10 @@ export default function App() {
           {/* Text */}
           <div className="px-5 md:px-8">
             <div className="mx-auto max-w-[700px]">
+              {bookData.chapters.length === 0 ? (
+                <div className="serif text-[16px] text-[#8c7e6f] text-center py-16 leading-[1.6]">Загрузи HTML книгу — текст появится здесь</div>
+              ) : (
+                <>
               {bookData.chapters.map((ch, chIdx) => (
                 <div key={ch.id} className="mb-10">
                   <h2 id={ch.id} className="serif text-[28px] md:text-[34px] font-bold tracking-[-0.02em] leading-[1.15] mt-10 mb-6">
@@ -1153,6 +1148,8 @@ export default function App() {
                 </div>
               ))}
               <div className="serif text-[14px] text-[#8c7e6f] text-center py-12">Конец книги • {total} предложений • листай вверх для загрузки новой • voices: {voices.length}</div>
+                </>
+              )}
             </div>
           </div>
         </main>
