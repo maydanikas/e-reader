@@ -925,47 +925,11 @@ export default function App() {
 
   const speedOptions = [0.8, 1, 1.2, 1.5, 1.8, 2];
 
-  // Service worker placeholder + manifest injection
+  // Real service worker so Chrome treats the app as installable
   useEffect(() => {
-    // Manifest
-    try {
-      const manifest = {
-        name: t('manifestName'),
-        short_name: "BookVoice",
-        start_url: ".",
-        display: "standalone",
-        background_color: "#fdf8f0",
-        theme_color: "#ff6b35",
-        icons: [
-          { src: "/bookvoice-icon.png?v=2", sizes: "192x192", type: "image/png", purpose: "any maskable" },
-          { src: "/bookvoice-icon.png?v=2", sizes: "512x512", type: "image/png", purpose: "any maskable" }
-        ]
-      };
-      const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      let link = document.querySelector('link[rel="manifest"]') as HTMLLinkElement;
-      if (!link) {
-        link = document.createElement('link');
-        link.rel = 'manifest';
-        document.head.appendChild(link);
-      }
-      link.href = url;
-    } catch {}
-
-    // SW placeholder - best effort
-    if ('serviceWorker' in navigator) {
-      try {
-        const swCode = `
-          self.addEventListener('install', e => self.skipWaiting());
-          self.addEventListener('activate', e => self.clients.claim());
-          self.addEventListener('fetch', e => {});
-        `;
-        const blob = new Blob([swCode], { type: 'text/javascript' });
-        const swUrl = URL.createObjectURL(blob);
-        navigator.serviceWorker.register(swUrl).catch(()=>{});
-      } catch {}
-    }
-  }, [t]);
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }, []);
 
   const groupedVoices = useMemo(() => {
     const ru = voices.filter(v => v.lang.toLowerCase().startsWith('ru'));

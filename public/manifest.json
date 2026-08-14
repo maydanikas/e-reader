@@ -1,0 +1,29 @@
+{
+  "name": "BookVoice",
+  "short_name": "BookVoice",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fdf8f0",
+  "theme_color": "#ff6b35",
+  "icons": [
+    {
+      "src": "/bookvoice-icon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/bookvoice-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/bookvoice-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
