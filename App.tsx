@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { Play, Pause, SkipBack, SkipForward, Rewind, Menu, X, Settings2, UploadCloud, BookOpen, Volume2, Smartphone, AlertCircle } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, Rewind, Menu, X, Settings2, UploadCloud, BookOpen, Volume2, Smartphone, AlertCircle, Trash2 } from 'lucide-react';
 
 // Types
 type Sentence = {
@@ -161,7 +161,10 @@ function parseBookHtml(htmlString: string): { chapters: Chapter[]; flatSentences
 const STATE_KEY = 'bookvoice_state';
 const HTML_FALLBACK_KEY = 'bookvoice_html';
 const IDB_NAME = 'bookvoice';
+const IDB_VERSION = 2;
 const IDB_STORE = 'kv';
+const BOOKS_STORE = 'books';
+const LIBRARY_KEY = 'library';
 const BOOK_HTML_KEY = 'bookHtml';
 
 type PersistedState = {
@@ -170,14 +173,39 @@ type PersistedState = {
   voiceName?: string;
   isDemo?: boolean;
   bookName?: string;
+  activeBookId?: string;
+  progress?: Record<string, number>;
 };
+
+type LibraryEntry = {
+  id: string;
+  name: string;
+  sentenceCount: number;
+  chapterCount: number;
+  updatedAt: number;
+};
+
+type StoredBook = LibraryEntry & { html: string };
+
+function bookIdFromName(name: string): string {
+  const base = name.replace(/\\/g, '/').split('/').pop() || name;
+  return base.trim().toLowerCase();
+}
+
+function displayBookName(name: string): string {
+  return name.replace(/\\/g, '/').split('/').pop() || name;
+}
 
 function idbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
     req.onupgradeneeded = () => {
-      if (!req.result.objectStoreNames.contains(IDB_STORE)) {
-        req.result.createObjectStore(IDB_STORE);
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+      if (!db.objectStoreNames.contains(BOOKS_STORE)) {
+        db.createObjectStore(BOOKS_STORE, { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -251,24 +279,84 @@ async function loadSavedBookHtml(): Promise<string | undefined> {
   return undefined;
 }
 
-async function saveBookHtml(html: string): Promise<boolean> {
-  const ok = await idbSet(BOOK_HTML_KEY, html);
-  if (ok) {
-    try { localStorage.removeItem(HTML_FALLBACK_KEY); } catch {}
-    return true;
-  }
+async function idbBookGet(id: string): Promise<StoredBook | undefined> {
   try {
-    localStorage.setItem(HTML_FALLBACK_KEY, html);
+    const db = await idbOpen();
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction(BOOKS_STORE, 'readonly').objectStore(BOOKS_STORE).get(id);
+      req.onsuccess = () => resolve(req.result as StoredBook | undefined);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function idbBookPut(book: StoredBook): Promise<boolean> {
+  try {
+    const db = await idbOpen();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(BOOKS_STORE, 'readwrite');
+      tx.objectStore(BOOKS_STORE).put(book);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
     return true;
   } catch {
     return false;
   }
 }
 
+async function idbBookDel(id: string): Promise<void> {
+  try {
+    const db = await idbOpen();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(BOOKS_STORE, 'readwrite');
+      tx.objectStore(BOOKS_STORE).delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {}
+}
+
+async function loadLibrary(): Promise<LibraryEntry[]> {
+  const list = await idbGet<LibraryEntry[]>(LIBRARY_KEY);
+  return Array.isArray(list) ? list : [];
+}
+
+async function saveLibrary(entries: LibraryEntry[]): Promise<void> {
+  await idbSet(LIBRARY_KEY, entries);
+}
+
+async function upsertStoredBook(
+  name: string,
+  html: string,
+  parsed: { chapters: Chapter[]; flatSentences: Sentence[] },
+): Promise<{ entry: LibraryEntry; replaced: boolean } | null> {
+  const id = bookIdFromName(name);
+  if (!id) return null;
+  const existing = await idbBookGet(id);
+  const entry: LibraryEntry = {
+    id,
+    name: displayBookName(name),
+    sentenceCount: parsed.flatSentences.length,
+    chapterCount: parsed.chapters.length,
+    updatedAt: Date.now(),
+  };
+  const ok = await idbBookPut({ ...entry, html });
+  if (!ok) return null;
+  const library = await loadLibrary();
+  await saveLibrary([entry, ...library.filter(item => item.id !== id)]);
+  return { entry, replaced: !!existing };
+}
+
 export default function App() {
   const [bookData, setBookData] = useState<{ chapters: Chapter[]; flatSentences: Sentence[]; flatParagraphs: Paragraph[] }>(() => parseBookHtml(SAMPLE_HTML));
   const [isDemo, setIsDemo] = useState(true);
   const [bookName, setBookName] = useState('');
+  const [library, setLibrary] = useState<LibraryEntry[]>([]);
+  const [activeBookId, setActiveBookId] = useState('');
+  const [progressMap, setProgressMap] = useState<Record<string, number>>({});
   const [hydrated, setHydrated] = useState(false);
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -296,6 +384,9 @@ export default function App() {
   const toastTimerRef = useRef<any>(null);
   const userLoadedRef = useRef(false);
   const preferredVoiceRef = useRef(selectedVoiceName);
+  const activeBookIdRef = useRef('');
+  const isDemoRef = useRef(true);
+  const progressMapRef = useRef<Record<string, number>>({});
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -307,6 +398,10 @@ export default function App() {
     preferredVoiceRef.current = name;
     setSelectedVoiceName(name);
   }, []);
+
+  useEffect(() => { activeBookIdRef.current = activeBookId; }, [activeBookId]);
+  useEffect(() => { isDemoRef.current = isDemo; }, [isDemo]);
+  useEffect(() => { progressMapRef.current = progressMap; }, [progressMap]);
 
   const refreshVoices = useCallback(() => {
     try {
@@ -342,7 +437,7 @@ export default function App() {
     };
   }, [refreshVoices]);
 
-  // Restore book + position before any writes
+  // Restore library + active book before any writes
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -350,41 +445,83 @@ export default function App() {
       if (typeof data.rate === 'number') setRate(data.rate);
       if (typeof data.voiceName === 'string' && data.voiceName) chooseVoice(data.voiceName);
 
-      const html = await loadSavedBookHtml();
+      let libraryEntries = await loadLibrary();
+      const progress: Record<string, number> = (data.progress && typeof data.progress === 'object') ? { ...data.progress } : {};
+
+      if (libraryEntries.length === 0) {
+        const html = await loadSavedBookHtml();
+        if (html && data.isDemo === false) {
+          try {
+            const parsed = parseBookHtml(html);
+            if (parsed.flatSentences.length) {
+              const name = (typeof data.bookName === 'string' && data.bookName) ? data.bookName : 'Книга.html';
+              const saved = await upsertStoredBook(name, html, parsed);
+              if (saved) {
+                libraryEntries = [saved.entry];
+                const idx = clampIdx(typeof data.currentIdx === 'number' ? data.currentIdx : 0, parsed.flatSentences.length);
+                progress[saved.entry.id] = idx;
+                await idbDel(BOOK_HTML_KEY);
+                try { localStorage.removeItem(HTML_FALLBACK_KEY); } catch {}
+              }
+            }
+          } catch {}
+        }
+      } else if (typeof data.currentIdx === 'number') {
+        const fallbackId = data.activeBookId || (data.bookName ? bookIdFromName(data.bookName) : '');
+        if (fallbackId && progress[fallbackId] == null) progress[fallbackId] = data.currentIdx;
+      }
+
       if (cancelled) return;
       if (userLoadedRef.current) {
         setHydrated(true);
         return;
       }
 
-      if (html && data.isDemo === false) {
-        try {
-          const parsed = parseBookHtml(html);
-          if (parsed.flatSentences.length) {
-            setBookData(parsed);
-            setIsDemo(false);
-            if (typeof data.bookName === 'string') setBookName(data.bookName);
-            const idx = clampIdx(typeof data.currentIdx === 'number' ? data.currentIdx : 0, parsed.flatSentences.length);
-            setCurrentIdx(idx);
-            currentIdxRef.current = idx;
-            setHydrated(true);
-            return;
-          }
-        } catch {}
+      setLibrary(libraryEntries);
+      setProgressMap(progress);
+
+      const activeId = (data.activeBookId && libraryEntries.some(b => b.id === data.activeBookId))
+        ? data.activeBookId
+        : (data.bookName ? libraryEntries.find(b => b.id === bookIdFromName(data.bookName))?.id : undefined) || libraryEntries[0]?.id;
+
+      if (activeId && data.isDemo !== true) {
+        const stored = await idbBookGet(activeId);
+        if (cancelled) return;
+        if (stored?.html) {
+          try {
+            const parsed = parseBookHtml(stored.html);
+            if (parsed.flatSentences.length) {
+              const idx = clampIdx(progress[activeId] ?? data.currentIdx ?? 0, parsed.flatSentences.length);
+              setBookData(parsed);
+              setIsDemo(false);
+              setBookName(stored.name);
+              setActiveBookId(activeId);
+              activeBookIdRef.current = activeId;
+              isDemoRef.current = false;
+              setCurrentIdx(idx);
+              currentIdxRef.current = idx;
+              setHydrated(true);
+              return;
+            }
+          } catch {}
+        }
       }
 
       const demoTotal = parseBookHtml(SAMPLE_HTML).flatSentences.length;
-      const idx = clampIdx(typeof data.currentIdx === 'number' ? data.currentIdx : 0, demoTotal);
+      const idx = clampIdx(typeof data.currentIdx === 'number' && !activeId ? data.currentIdx : 0, demoTotal);
       setCurrentIdx(idx);
       currentIdxRef.current = idx;
       setHydrated(true);
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [chooseVoice]);
 
   // Persist position and settings after restore
   useEffect(() => {
     if (!hydrated) return;
+    const progress = { ...progressMap, ...progressMapRef.current };
+    if (activeBookId && !isDemo) progress[activeBookId] = currentIdx;
+    progressMapRef.current = progress;
     try {
       localStorage.setItem(STATE_KEY, JSON.stringify({
         currentIdx,
@@ -392,9 +529,11 @@ export default function App() {
         voiceName: selectedVoiceName || preferredVoiceRef.current,
         isDemo,
         bookName,
+        activeBookId,
+        progress,
       } satisfies PersistedState));
     } catch {}
-  }, [hydrated, currentIdx, rate, selectedVoiceName, isDemo, bookName]);
+  }, [hydrated, currentIdx, rate, selectedVoiceName, isDemo, bookName, activeBookId, progressMap]);
 
   // Wake lock
   const requestWakeLock = async () => {
@@ -593,66 +732,177 @@ export default function App() {
   };
 
   // File handling
-  const loadHtmlFile = useCallback((file: File) => {
-    if (!file) {
+  const rememberCurrentProgress = useCallback(() => {
+    const id = activeBookIdRef.current;
+    if (!id || isDemoRef.current) return;
+    const idx = currentIdxRef.current;
+    progressMapRef.current = { ...progressMapRef.current, [id]: idx };
+    setProgressMap(prev => (prev[id] === idx ? prev : { ...prev, [id]: idx }));
+  }, []);
+
+  const openStoredBook = useCallback(async (id: string, preferIdx?: number) => {
+    const stored = await idbBookGet(id);
+    if (!stored?.html) {
+      showToast('Не удалось открыть книгу');
+      return false;
+    }
+    try {
+      const parsed = parseBookHtml(stored.html);
+      if (!parsed.flatSentences.length) {
+        showToast('В книге нет текста');
+        return false;
+      }
+      const idx = clampIdx(preferIdx ?? 0, parsed.flatSentences.length);
+      userLoadedRef.current = true;
+      setBookData(parsed);
+      setIsDemo(false);
+      isDemoRef.current = false;
+      setBookName(stored.name);
+      setActiveBookId(id);
+      activeBookIdRef.current = id;
+      setCurrentIdx(idx);
+      currentIdxRef.current = idx;
+      setProgressMap(prev => ({ ...prev, [id]: idx }));
+      stopSpeaking();
+      setShowToc(false);
+      return true;
+    } catch {
+      showToast('Ошибка парсинга HTML');
+      return false;
+    }
+  }, [showToast, stopSpeaking]);
+
+  const loadHtmlFiles = useCallback(async (files: File[]) => {
+    const htmlFiles = files.filter(Boolean);
+    if (!htmlFiles.length) {
       showToast('Файл не выбран');
       return;
     }
-    if (!file.name.toLowerCase().endsWith('.html') && !file.name.toLowerCase().endsWith('.htm')) {
-      showToast('Пожалуйста, загрузите .html или .htm файл');
-      // still try to read
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
+    rememberCurrentProgress();
+
+    let added = 0;
+    let updated = 0;
+    let last: { entry: LibraryEntry; replaced: boolean; parsed: ReturnType<typeof parseBookHtml>; keepIdx: number } | null = null;
+
+    for (const file of htmlFiles) {
+      const lower = file.name.toLowerCase();
+      if (!lower.endsWith('.html') && !lower.endsWith('.htm')) {
+        showToast(`Пропущен файл: ${file.name}`);
+      }
+      let text = '';
       try {
-        const text = reader.result as string;
-        if (!text || text.trim().length < 20) {
-          showToast('Файл пустой');
-          return;
-        }
-        // Parse via DOMParser as required
-        const parsed = parseBookHtml(text);
-        if (!parsed.flatSentences.length) {
-          showToast('Не удалось распарсить книгу - нет текста');
-          return;
-        }
-        userLoadedRef.current = true;
-        setBookData(parsed);
+        text = await file.text();
+      } catch {
+        showToast(`Ошибка чтения: ${file.name}`);
+        continue;
+      }
+      if (!text || text.trim().length < 20) {
+        showToast(`Файл пустой: ${file.name}`);
+        continue;
+      }
+      let parsed: ReturnType<typeof parseBookHtml>;
+      try {
+        parsed = parseBookHtml(text);
+      } catch {
+        showToast(`Ошибка парсинга: ${file.name}`);
+        continue;
+      }
+      if (!parsed.flatSentences.length) {
+        showToast(`Нет текста: ${file.name}`);
+        continue;
+      }
+      const saved = await upsertStoredBook(file.name, text, parsed);
+      if (!saved) {
+        showToast(`Не удалось сохранить: ${file.name}`);
+        continue;
+      }
+      const isCurrent = saved.entry.id === activeBookIdRef.current && !isDemoRef.current;
+      const previousIdx = isCurrent
+        ? currentIdxRef.current
+        : (progressMapRef.current[saved.entry.id] ?? 0);
+      const keepIdx = saved.replaced ? clampIdx(previousIdx, parsed.flatSentences.length) : 0;
+      if (saved.replaced) updated += 1;
+      else added += 1;
+      last = { entry: saved.entry, replaced: saved.replaced, parsed, keepIdx };
+      setLibrary(prev => [saved.entry, ...prev.filter(item => item.id !== saved.entry.id)]);
+      progressMapRef.current = { ...progressMapRef.current, [saved.entry.id]: keepIdx };
+      setProgressMap(prev => ({ ...prev, [saved.entry.id]: keepIdx }));
+    }
+
+    if (!last) return;
+
+    userLoadedRef.current = true;
+    setBookData(last.parsed);
+    setIsDemo(false);
+    isDemoRef.current = false;
+    setBookName(last.entry.name);
+    setActiveBookId(last.entry.id);
+    activeBookIdRef.current = last.entry.id;
+    setCurrentIdx(last.keepIdx);
+    currentIdxRef.current = last.keepIdx;
+    stopSpeaking();
+    setShowToc(false);
+
+    if (htmlFiles.length === 1) {
+      showToast(last.replaced
+        ? `Обновлено: ${last.entry.name}. Место чтения сохранено.`
+        : `В библиотеке: ${last.entry.name} — ${last.entry.chapterCount} гл., ${last.entry.sentenceCount} предл.`);
+    } else {
+      showToast(`Библиотека: ${added ? `+${added} новых` : 'без новых'}${updated ? `, ${updated} обновлено` : ''}`);
+    }
+  }, [rememberCurrentProgress, showToast, stopSpeaking]);
+
+  const openLibraryBook = useCallback(async (id: string) => {
+    if (id === activeBookIdRef.current && !isDemoRef.current) {
+      setShowToc(false);
+      return;
+    }
+    rememberCurrentProgress();
+    await openStoredBook(id, progressMapRef.current[id]);
+  }, [openStoredBook, rememberCurrentProgress]);
+
+  const deleteLibraryBook = useCallback(async (id: string) => {
+    await idbBookDel(id);
+    const remaining = (await loadLibrary()).filter(item => item.id !== id);
+    await saveLibrary(remaining);
+    setLibrary(remaining);
+    setProgressMap(prev => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    if (id === activeBookIdRef.current) {
+      stopSpeaking();
+      if (remaining[0]) {
+        await openStoredBook(remaining[0].id, progressMapRef.current[remaining[0].id] ?? 0);
+        showToast(`Открыта: ${remaining[0].name}`);
+      } else {
+        setBookData(parseBookHtml(SAMPLE_HTML));
+        setIsDemo(true);
+        isDemoRef.current = true;
+        setBookName('');
+        setActiveBookId('');
+        activeBookIdRef.current = '';
         setCurrentIdx(0);
         currentIdxRef.current = 0;
-        setIsDemo(false);
-        setBookName(file.name);
-        stopSpeaking();
-        setShowToc(false);
-        showToast(`Загружено: ${parsed.chapters.length} глав, ${parsed.flatSentences.length} предложений`);
-        void saveBookHtml(text).then((ok) => {
-          if (!ok) showToast('Книга открыта, но не сохранилась — после перезапуска загрузи её снова');
-        });
-        try { localStorage.removeItem('bookvoice_has_book'); } catch {}
-      } catch (e) {
-        console.error(e);
-        showToast('Ошибка парсинга HTML');
+        showToast('Книга удалена');
       }
-    };
-    reader.onerror = () => {
-      console.error(reader.error);
-      showToast('Ошибка чтения файла');
-    };
-    reader.readAsText(file, 'utf-8');
-  }, [stopSpeaking, showToast]);
+    } else {
+      showToast('Книга удалена из библиотеки');
+    }
+  }, [openStoredBook, showToast, stopSpeaking]);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (f) loadHtmlFile(f);
-    // reset value to allow re-select same file
+    const list = e.target.files;
+    if (list && list.length) void loadHtmlFiles(Array.from(list));
     e.target.value = '';
-  }, [loadHtmlFile]);
+  }, [loadHtmlFiles]);
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) loadHtmlFile(file);
+    const list = e.dataTransfer.files;
+    if (list && list.length) void loadHtmlFiles(Array.from(list));
     else showToast('Перетащите .html файл');
   };
 
@@ -814,8 +1064,8 @@ export default function App() {
                 <UploadCloud className="text-[#ff6b35]" />
               </div>
               <div className="flex-1 text-center md:text-left">
-                <div className="sans font-bold text-[15px]">{isDemo ? 'Демо книга загружена — протестируй голос' : (bookName ? `Продолжаем: ${bookName}` : 'Книга загружена — можно читать')}</div>
-                <div className="sans text-[13px] text-[#8c7e6f] mt-1">Перетащи .html сюда или нажми загрузить. Парсим &lt;h1-h3&gt; и &lt;p&gt;. Поддерживаем data-page.</div>
+                <div className="sans font-bold text-[15px]">{isDemo ? 'Демо книга загружена — протестируй голос' : (bookName ? `Сейчас: ${bookName}` : 'Книга загружена — можно читать')}</div>
+                <div className="sans text-[13px] text-[#8c7e6f] mt-1">Перетащи один или несколько .html. Файл с тем же именем обновит книгу и оставит место чтения.</div>
                 <div className="mt-2 flex flex-wrap gap-2 justify-center md:justify-start">
                   {isDemo && <div className="inline-flex sans text-[11px] px-2 py-1 rounded-full bg-[#ff6b35]/10 text-[#ff6b35] font-bold">DEMO MODE</div>}
                   <div className="inline-flex sans text-[11px] px-2 py-1 rounded-full bg-[#1a1a1a] text-white/80">голосов: {voices.length} • {groupedVoices[0]?.lang || 'loading'}</div>
@@ -823,15 +1073,47 @@ export default function App() {
               </div>
               <div className="flex gap-2 w-full md:w-auto flex-col">
                 <label htmlFor="book-file-input" className="sans flex-1 md:flex-none h-11 px-5 rounded-full bg-[#1a1a1a] text-white text-[14px] font-medium hover:bg-black active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer">
-                  Загрузить HTML книгу
+                  Загрузить HTML книги
                 </label>
-                <button type="button" onClick={()=>fileInputRef.current?.click()} className="sans md:hidden h-10 px-4 rounded-full bg-white border border-[#e7ddd0] text-[13px]">или выбрать файл</button>
+                <button type="button" onClick={()=>fileInputRef.current?.click()} className="sans md:hidden h-10 px-4 rounded-full bg-white border border-[#e7ddd0] text-[13px]">или выбрать файлы</button>
               </div>
               {/* Primary file input with proper id and label */}
-              <input id="book-file-input" ref={fileInputRef} type="file" accept=".html,.htm,text/html" className="hidden" onChange={handleFileChange} />
+              <input id="book-file-input" ref={fileInputRef} type="file" accept=".html,.htm,text/html" multiple className="hidden" onChange={handleFileChange} />
               {/* Second hidden input for fallback */}
-              <input id="book-file-input-2" ref={fileInputRef2} type="file" accept=".html,.htm" className="sr-only" tabIndex={-1} onChange={handleFileChange} />
+              <input id="book-file-input-2" ref={fileInputRef2} type="file" accept=".html,.htm" multiple className="sr-only" tabIndex={-1} onChange={handleFileChange} />
             </div>
+            {library.length > 0 && (
+              <div className="mt-4 rounded-[24px] bg-white border border-[#e7ddd0] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.04)]">
+                <div className="sans text-[11px] font-bold tracking-widest text-[#8c7e6f] mb-3">БИБЛИОТЕКА • {library.length}</div>
+                <div className="space-y-1">
+                  {library.map(book => {
+                    const active = book.id === activeBookId && !isDemo;
+                    const idx = active ? currentIdx : (progressMap[book.id] ?? 0);
+                    return (
+                      <div
+                        key={book.id}
+                        className={`flex items-center gap-2 rounded-xl px-3 py-2.5 ${active ? 'bg-[#ff6b35] text-white shadow' : 'hover:bg-[#fdf8f0] text-[#3d3229]'}`}
+                      >
+                        <button type="button" onClick={()=>{ void openLibraryBook(book.id); }} className="flex-1 text-left min-w-0">
+                          <div className="sans text-[14px] font-bold truncate">{book.name}</div>
+                          <div className={`sans text-[11px] mt-[2px] ${active ? 'text-white/80' : 'text-[#8c7e6f]'}`}>
+                            {book.chapterCount} гл. • {Math.min(idx + 1, book.sentenceCount)} / {book.sentenceCount} предл.
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={()=>{ void deleteLibraryBook(book.id); }}
+                          className={`w-10 h-10 rounded-full grid place-items-center shrink-0 ${active ? 'bg-white/15 hover:bg-white/25' : 'bg-[#fdf8f0] border border-[#e7ddd0] hover:bg-white'}`}
+                          aria-label={`Удалить ${book.name}`}
+                        >
+                          <Trash2 size={16}/>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Text */}
@@ -974,7 +1256,7 @@ export default function App() {
               ))}
             </div>
             <div className="p-4 border-t border-[#e7ddd0] space-y-3">
-              <label htmlFor="book-file-input" className="w-full h-12 rounded-full bg-[#ff6b35] text-white sans font-medium flex items-center justify-center cursor-pointer">Загрузить книгу</label>
+              <label htmlFor="book-file-input" className="w-full h-12 rounded-full bg-[#ff6b35] text-white sans font-medium flex items-center justify-center cursor-pointer">Загрузить книги</label>
               <button type="button" onClick={handleInstallClick} className="w-full h-12 rounded-full bg-white border border-[#e7ddd0] sans text-[13px] flex items-center justify-center gap-2"><Smartphone size={16}/> Установить на главный экран</button>
             </div>
           </div>
@@ -1027,7 +1309,7 @@ export default function App() {
                   <li>Мы разбиваем параграф на предложения через Intl.Segmenter</li>
                   <li>Каждое предложение озвучивается по очереди через onend</li>
                   <li>Текущее предложение подсвечивается и скроллится smooth</li>
-                  <li>Книга и позиция сохраняются и восстанавливаются после перезапуска</li>
+                  <li>Книги хранятся в библиотеке. Файл с тем же именем обновляет книгу и оставляет место чтения</li>
                   <li>При воспроизведении пробуем Wake Lock чтобы экран не гас</li>
                   <li>Работает offline, это PWA</li>
                 </ul>
@@ -1035,19 +1317,14 @@ export default function App() {
 
               <button type="button" onClick={()=>{
                 stopSpeaking();
-                try {
-                  localStorage.removeItem(STATE_KEY);
-                  localStorage.removeItem(HTML_FALLBACK_KEY);
-                  localStorage.removeItem('bookvoice_has_book');
-                } catch {}
-                void idbDel(BOOK_HTML_KEY);
-                setBookData(parseBookHtml(SAMPLE_HTML));
-                setIsDemo(true);
-                setBookName('');
                 setCurrentIdx(0);
                 currentIdxRef.current = 0;
+                if (activeBookId) {
+                  progressMapRef.current = { ...progressMapRef.current, [activeBookId]: 0 };
+                  setProgressMap(prev => ({ ...prev, [activeBookId]: 0 }));
+                }
                 setShowSettings(false);
-                showToast('Прогресс сброшен');
+                showToast('Прогресс текущей книги сброшен');
               }} className="w-full h-11 rounded-full bg-[#fdf8f0] border border-[#e7ddd0] sans text-[13px]">Сбросить прогресс</button>
             </div>
           </div>
