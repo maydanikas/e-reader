@@ -28,32 +28,6 @@ type Chapter = {
 
 const EMPTY_BOOK = { chapters: [] as Chapter[], flatSentences: [] as Sentence[], flatParagraphs: [] as Paragraph[] };
 
-const KEEP_ALIVE_SRC = (() => {
-  const sampleRate = 8000;
-  const samples = sampleRate;
-  const dataSize = samples * 2;
-  const buf = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buf);
-  const ascii = (offset: number, s: string) => {
-    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
-  };
-  ascii(0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true);
-  ascii(8, 'WAVE');
-  ascii(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  ascii(36, 'data');
-  view.setUint32(40, dataSize, true);
-  for (let i = 0; i < samples; i++) view.setInt16(44 + i * 2, 1, true);
-  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
-})();
-
 function splitIntoSentences(text: string): string[] {
   if (!text.trim()) return [];
   // Use Intl.Segmenter if available
@@ -407,6 +381,7 @@ export default function App() {
   const preferredVoiceRef = useRef(selectedVoiceName);
   const activeBookIdRef = useRef('');
   const isDemoRef = useRef(true);
+  const lastTtsKickRef = useRef(0);
   const progressMapRef = useRef<Record<string, number>>({});
 
   const showToast = useCallback((msg: string) => {
@@ -567,12 +542,16 @@ export default function App() {
   const startKeepAlive = useCallback(async () => {
     const el = keepAliveRef.current;
     if (!el) return;
-    if (!el.src) el.src = KEEP_ALIVE_SRC;
     el.loop = true;
+    el.muted = false;
+    el.volume = 1;
+    try {
+      el.title = bookName || 'BookVoice';
+    } catch {}
     try {
       await el.play();
     } catch {}
-  }, []);
+  }, [bookName]);
 
   const stopKeepAlive = useCallback(() => {
     const el = keepAliveRef.current;
@@ -593,16 +572,12 @@ export default function App() {
         title: bookName || 'BookVoice',
         artist: chapter?.title || 'BookVoice',
         album: 'BookVoice',
-        artwork: [{ src: `${location.origin}/bookvoice-icon.png`, sizes: '512x512', type: 'image/png' }],
+        artwork: [
+          { src: `${location.origin}/bookvoice-icon.png`, sizes: '192x192', type: 'image/png' },
+          { src: `${location.origin}/bookvoice-icon.png`, sizes: '512x512', type: 'image/png' },
+        ],
       });
       navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
-      if (sentences.length && navigator.mediaSession.setPositionState) {
-        navigator.mediaSession.setPositionState({
-          duration: Math.max(1, sentences.length),
-          playbackRate: 1,
-          position: Math.max(0, Math.min(idx, Math.max(0, sentences.length - 1))),
-        });
-      }
     } catch {}
   }, [bookData.chapters, bookData.flatSentences, bookName]);
 
@@ -670,6 +645,7 @@ export default function App() {
       if (next < sentences.length) {
         currentIdxRef.current = next;
         setCurrentIdx(next);
+        lastTtsKickRef.current = Date.now();
         // queue next sentence after small delay to avoid clipping
         setTimeout(() => speakAt(next, 0), 40);
       } else {
@@ -696,6 +672,7 @@ export default function App() {
     utteranceRef.current = utter;
     try {
       synthRef.current = synth;
+      lastTtsKickRef.current = Date.now();
       synth.speak(utter);
     } catch (err) {
       console.error(err);
@@ -703,6 +680,21 @@ export default function App() {
       stopSpeaking();
     }
   }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast, t, updateMediaSession]);
+
+  const kickTts = useCallback(() => {
+    if (!isPlayingRef.current) return;
+    const el = keepAliveRef.current;
+    if (el && el.paused) void el.play().catch(() => {});
+    const synth = window.speechSynthesis;
+    if (synth.speaking) return;
+    const now = Date.now();
+    if (now - lastTtsKickRef.current < 800) return;
+    lastTtsKickRef.current = now;
+    try {
+      if (synth.paused) synth.resume();
+      else speakAt(currentIdxRef.current, 0);
+    } catch {}
+  }, [speakAt]);
 
   const jumpTo = useCallback((idx: number) => {
     const total = bookData.flatSentences.length;
@@ -810,6 +802,18 @@ export default function App() {
       } catch {}
     };
   }, [handlePlayPause, jumpTo, stopSpeaking]);
+
+  useEffect(() => {
+    const el = keepAliveRef.current;
+    if (!el) return;
+    const onBeat = () => kickTts();
+    el.addEventListener('timeupdate', onBeat);
+    el.addEventListener('playing', onBeat);
+    return () => {
+      el.removeEventListener('timeupdate', onBeat);
+      el.removeEventListener('playing', onBeat);
+    };
+  }, [kickTts]);
 
   useEffect(() => {
     const onVis = () => {
@@ -1050,8 +1054,15 @@ export default function App() {
   }, [voices]);
 
   return (
-    <div className="min-h-[100dvh] bg-[#fdf8f0] text-[#1a1a1a] flex flex-col selection:bg-[#ff6b35]/20">
-      <audio ref={keepAliveRef} loop playsInline className="hidden" />
+    <div className="relative min-h-[100dvh] bg-[#fdf8f0] text-[#1a1a1a] flex flex-col selection:bg-[#ff6b35]/20">
+      <audio
+        ref={keepAliveRef}
+        src="/keepalive.wav"
+        loop
+        playsInline
+        preload="auto"
+        className="pointer-events-none absolute bottom-0 left-0 h-px w-px opacity-[0.01]"
+      />
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Manrope:wght@500;700&display=swap');
         .serif { font-family: 'Merriweather', Georgia, serif; }
