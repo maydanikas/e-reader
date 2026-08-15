@@ -382,6 +382,7 @@ export default function App() {
   const activeBookIdRef = useRef('');
   const isDemoRef = useRef(true);
   const lastTtsKickRef = useRef(0);
+  const ttsFailRef = useRef(0);
   const progressMapRef = useRef<Record<string, number>>({});
 
   const showToast = useCallback((msg: string) => {
@@ -539,19 +540,11 @@ export default function App() {
     } catch {}
   }, [hydrated, currentIdx, rate, selectedVoiceName, isDemo, bookName, activeBookId, progressMap]);
 
-  const startKeepAlive = useCallback(async () => {
+  const pauseKeepAlive = useCallback(() => {
     const el = keepAliveRef.current;
     if (!el) return;
-    el.loop = true;
-    el.muted = false;
-    el.volume = 1;
-    try {
-      el.title = bookName || 'BookVoice';
-    } catch {}
-    try {
-      await el.play();
-    } catch {}
-  }, [bookName]);
+    try { el.pause(); } catch {}
+  }, []);
 
   const stopKeepAlive = useCallback(() => {
     const el = keepAliveRef.current;
@@ -561,6 +554,26 @@ export default function App() {
       el.currentTime = 0;
     } catch {}
   }, []);
+
+  // Brief audible pulse so Android keeps the media notification. Must be paused
+  // before speechSynthesis.speak() or Chrome returns synthesis-failed.
+  const pulseKeepAlive = useCallback(async (ms = 220) => {
+    const el = keepAliveRef.current;
+    if (!el) return;
+    el.loop = true;
+    el.muted = false;
+    el.volume = 0.08;
+    try {
+      el.title = bookName || 'BookVoice';
+    } catch {}
+    try {
+      await el.play();
+    } catch {
+      return;
+    }
+    await new Promise(r => setTimeout(r, ms));
+    try { el.pause(); } catch {}
+  }, [bookName]);
 
   const updateMediaSession = useCallback((playing: boolean, idx = currentIdxRef.current) => {
     if (!('mediaSession' in navigator)) return;
@@ -634,67 +647,87 @@ export default function App() {
     utter.pitch = 1;
     utter.volume = 1;
 
+    let failed = false;
     utter.onstart = () => {
+      ttsFailRef.current = 0;
       currentIdxRef.current = idx;
       setCurrentIdx(idx);
       updateMediaSession(true, idx);
     };
     utter.onend = () => {
-      if (!isPlayingRef.current) return;
+      if (failed || !isPlayingRef.current) return;
       const next = idx + 1;
       if (next < sentences.length) {
         currentIdxRef.current = next;
         setCurrentIdx(next);
         lastTtsKickRef.current = Date.now();
-        // queue next sentence after small delay to avoid clipping
-        setTimeout(() => speakAt(next, 0), 40);
+        const continueNext = () => {
+          if (!isPlayingRef.current) return;
+          pauseKeepAlive();
+          speakAt(next, 0);
+        };
+        if (document.hidden) {
+          void pulseKeepAlive(180).then(continueNext);
+        } else {
+          setTimeout(continueNext, 40);
+        }
       } else {
         stopSpeaking();
         showToast(t('endOfBook'));
       }
     };
     utter.onerror = (e: any) => {
-      console.error('TTS error', e);
       const err = e?.error || 'unknown';
       if (err === 'canceled' || err === 'interrupted') return;
-      showToast(t('ttsError', { err }));
-      if (isPlayingRef.current) {
-        const next = idx + 1;
-        if (next < sentences.length) {
-          currentIdxRef.current = next;
-          setCurrentIdx(next);
-          setTimeout(() => speakAt(next, 0), 300);
-        } else {
-          stopSpeaking();
-        }
+      failed = true;
+      console.error('TTS error', e);
+      if (!isPlayingRef.current) return;
+      pauseKeepAlive();
+      ttsFailRef.current += 1;
+      if (ttsFailRef.current <= 3) {
+        lastTtsKickRef.current = Date.now();
+        setTimeout(() => {
+          if (!isPlayingRef.current) return;
+          pauseKeepAlive();
+          speakAt(idx, Math.max(attempt, 1));
+        }, 350 * ttsFailRef.current);
+        return;
       }
+      showToast(t('ttsError', { err }));
+      isPlayingRef.current = false;
+      setIsPlaying(false);
+      updateMediaSession(false);
     };
     utteranceRef.current = utter;
-    try {
-      synthRef.current = synth;
-      lastTtsKickRef.current = Date.now();
-      synth.speak(utter);
-    } catch (err) {
-      console.error(err);
-      showToast(t('ttsStartFailed'));
-      stopSpeaking();
-    }
-  }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast, t, updateMediaSession]);
+    pauseKeepAlive();
+    window.setTimeout(() => {
+      if (!isPlayingRef.current || utteranceRef.current !== utter) return;
+      pauseKeepAlive();
+      try {
+        synthRef.current = synth;
+        lastTtsKickRef.current = Date.now();
+        synth.speak(utter);
+      } catch (err) {
+        console.error(err);
+        showToast(t('ttsStartFailed'));
+        stopSpeaking();
+      }
+    }, 80);
+  }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast, t, updateMediaSession, pauseKeepAlive, pulseKeepAlive]);
 
   const kickTts = useCallback(() => {
     if (!isPlayingRef.current) return;
-    const el = keepAliveRef.current;
-    if (el && el.paused) void el.play().catch(() => {});
     const synth = window.speechSynthesis;
     if (synth.speaking) return;
     const now = Date.now();
-    if (now - lastTtsKickRef.current < 800) return;
+    if (now - lastTtsKickRef.current < 1000) return;
     lastTtsKickRef.current = now;
+    pauseKeepAlive();
     try {
       if (synth.paused) synth.resume();
       else speakAt(currentIdxRef.current, 0);
     } catch {}
-  }, [speakAt]);
+  }, [speakAt, pauseKeepAlive]);
 
   const jumpTo = useCallback((idx: number) => {
     const total = bookData.flatSentences.length;
@@ -707,9 +740,10 @@ export default function App() {
     if (resume) {
       isPlayingRef.current = true;
       setIsPlaying(true);
+      pauseKeepAlive();
       setTimeout(() => speakAt(next, 0), 60);
     }
-  }, [bookData.flatSentences.length, speakAt]);
+  }, [bookData.flatSentences.length, speakAt, pauseKeepAlive]);
 
   const handlePlayPause = useCallback(async () => {
     if (!bookData.flatSentences.length) {
@@ -730,13 +764,13 @@ export default function App() {
       }
       isPlayingRef.current = false;
       setIsPlaying(false);
-      stopKeepAlive();
+      pauseKeepAlive();
       updateMediaSession(false);
       return;
     }
     if (synth.paused) {
       try {
-        await startKeepAlive();
+        pauseKeepAlive();
         synth.resume();
         isPlayingRef.current = true;
         setIsPlaying(true);
@@ -745,15 +779,15 @@ export default function App() {
       } catch {}
     }
     try { synth.cancel(); } catch {}
-    await startKeepAlive();
-    setTimeout(() => {
-      isPlayingRef.current = true;
-      setIsPlaying(true);
-      currentIdxRef.current = currentIdx;
-      updateMediaSession(true, currentIdx);
-      speakAt(currentIdx, 0);
-    }, 60);
-  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, startKeepAlive, stopKeepAlive, updateMediaSession, showToast, t]);
+    ttsFailRef.current = 0;
+    await pulseKeepAlive(180);
+    pauseKeepAlive();
+    isPlayingRef.current = true;
+    setIsPlaying(true);
+    currentIdxRef.current = currentIdx;
+    updateMediaSession(true, currentIdx);
+    speakAt(currentIdx, 0);
+  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, pauseKeepAlive, pulseKeepAlive, updateMediaSession, showToast, t]);
 
   // Sync ref with state
   useEffect(() => { currentIdxRef.current = currentIdx; }, [currentIdx]);
@@ -804,26 +838,32 @@ export default function App() {
   }, [handlePlayPause, jumpTo, stopSpeaking]);
 
   useEffect(() => {
-    const el = keepAliveRef.current;
-    if (!el) return;
-    const onBeat = () => kickTts();
-    el.addEventListener('timeupdate', onBeat);
-    el.addEventListener('playing', onBeat);
-    return () => {
-      el.removeEventListener('timeupdate', onBeat);
-      el.removeEventListener('playing', onBeat);
-    };
+    const id = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      if (window.speechSynthesis.speaking) return;
+      kickTts();
+    }, 2000);
+    return () => clearInterval(id);
   }, [kickTts]);
 
   useEffect(() => {
     const onVis = () => {
       if (!isPlayingRef.current) return;
-      void startKeepAlive();
+      pauseKeepAlive();
       const synth = window.speechSynthesis;
-      try {
-        if (synth.paused) synth.resume();
-        else if (!synth.speaking) speakAt(currentIdxRef.current, 0);
-      } catch {}
+      const resumeTts = () => {
+        if (!isPlayingRef.current) return;
+        pauseKeepAlive();
+        try {
+          if (synth.paused) synth.resume();
+          else if (!synth.speaking) speakAt(currentIdxRef.current, 0);
+        } catch {}
+      };
+      if (document.hidden) {
+        void pulseKeepAlive(180).then(resumeTts);
+      } else {
+        resumeTts();
+      }
     };
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('pageshow', onVis);
@@ -831,7 +871,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('pageshow', onVis);
     };
-  }, [startKeepAlive, speakAt]);
+  }, [pauseKeepAlive, pulseKeepAlive, speakAt]);
 
   // Before install prompt
   useEffect(() => {
