@@ -28,6 +28,32 @@ type Chapter = {
 
 const EMPTY_BOOK = { chapters: [] as Chapter[], flatSentences: [] as Sentence[], flatParagraphs: [] as Paragraph[] };
 
+const KEEP_ALIVE_SRC = (() => {
+  const sampleRate = 8000;
+  const samples = sampleRate;
+  const dataSize = samples * 2;
+  const buf = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buf);
+  const ascii = (offset: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+  };
+  ascii(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, 'data');
+  view.setUint32(40, dataSize, true);
+  for (let i = 0; i < samples; i++) view.setInt16(44 + i * 2, 1, true);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+})();
+
 function splitIntoSentences(text: string): string[] {
   if (!text.trim()) return [];
   // Use Intl.Segmenter if available
@@ -372,7 +398,7 @@ export default function App() {
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const isPlayingRef = useRef(false);
   const currentIdxRef = useRef(0);
-  const wakeLockRef = useRef<any>(null);
+  const keepAliveRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef2 = useRef<HTMLInputElement>(null);
   const readerContainerRef = useRef<HTMLDivElement>(null);
@@ -538,22 +564,47 @@ export default function App() {
     } catch {}
   }, [hydrated, currentIdx, rate, selectedVoiceName, isDemo, bookName, activeBookId, progressMap]);
 
-  // Wake lock
-  const requestWakeLock = async () => {
+  const startKeepAlive = useCallback(async () => {
+    const el = keepAliveRef.current;
+    if (!el) return;
+    if (!el.src) el.src = KEEP_ALIVE_SRC;
+    el.loop = true;
     try {
-      // @ts-ignore
-      if (navigator.wakeLock) {
-        // @ts-ignore
-        wakeLockRef.current = await navigator.wakeLock.request('screen');
+      await el.play();
+    } catch {}
+  }, []);
+
+  const stopKeepAlive = useCallback(() => {
+    const el = keepAliveRef.current;
+    if (!el) return;
+    try {
+      el.pause();
+      el.currentTime = 0;
+    } catch {}
+  }, []);
+
+  const updateMediaSession = useCallback((playing: boolean, idx = currentIdxRef.current) => {
+    if (!('mediaSession' in navigator)) return;
+    const sentences = bookData.flatSentences;
+    const sent = sentences[idx];
+    const chapter = bookData.chapters[sent?.chapterIdx ?? 0];
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: bookName || 'BookVoice',
+        artist: chapter?.title || 'BookVoice',
+        album: 'BookVoice',
+        artwork: [{ src: `${location.origin}/bookvoice-icon.png`, sizes: '512x512', type: 'image/png' }],
+      });
+      navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+      if (sentences.length && navigator.mediaSession.setPositionState) {
+        navigator.mediaSession.setPositionState({
+          duration: Math.max(1, sentences.length),
+          playbackRate: 1,
+          position: Math.max(0, Math.min(idx, Math.max(0, sentences.length - 1))),
+        });
       }
     } catch {}
-  };
-  const releaseWakeLock = async () => {
-    try {
-      await wakeLockRef.current?.release();
-      wakeLockRef.current = null;
-    } catch {}
-  };
+  }, [bookData.chapters, bookData.flatSentences, bookName]);
 
   // TTS core
   const stopSpeaking = useCallback(() => {
@@ -563,8 +614,11 @@ export default function App() {
     utteranceRef.current = null;
     isPlayingRef.current = false;
     setIsPlaying(false);
-    releaseWakeLock();
-  }, []);
+    stopKeepAlive();
+    try {
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
+    } catch {}
+  }, [stopKeepAlive]);
 
   const speakAt = useCallback((idx: number, attempt = 0) => {
     const sentences = bookData.flatSentences;
@@ -608,7 +662,7 @@ export default function App() {
     utter.onstart = () => {
       currentIdxRef.current = idx;
       setCurrentIdx(idx);
-      // highlight + scroll is handled by effect
+      updateMediaSession(true, idx);
     };
     utter.onend = () => {
       if (!isPlayingRef.current) return;
@@ -648,7 +702,22 @@ export default function App() {
       showToast(t('ttsStartFailed'));
       stopSpeaking();
     }
-  }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast, t]);
+  }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast, t, updateMediaSession]);
+
+  const jumpTo = useCallback((idx: number) => {
+    const total = bookData.flatSentences.length;
+    if (!total) return;
+    const next = Math.max(0, Math.min(total - 1, idx));
+    const resume = isPlayingRef.current;
+    try { synthRef.current?.cancel(); } catch {}
+    setCurrentIdx(next);
+    currentIdxRef.current = next;
+    if (resume) {
+      isPlayingRef.current = true;
+      setIsPlaying(true);
+      setTimeout(() => speakAt(next, 0), 60);
+    }
+  }, [bookData.flatSentences.length, speakAt]);
 
   const handlePlayPause = useCallback(async () => {
     if (!bookData.flatSentences.length) {
@@ -657,12 +726,10 @@ export default function App() {
     }
     const synth = window.speechSynthesis;
     synthRef.current = synth;
-    // MUST call getVoices after user gesture per spec
     const vs = synth.getVoices();
     if (vs.length) setVoices(vs);
 
     if (isPlayingRef.current && synth.speaking && !synth.paused) {
-      // pause playback
       try {
         synth.pause();
       } catch {
@@ -671,29 +738,30 @@ export default function App() {
       }
       isPlayingRef.current = false;
       setIsPlaying(false);
-      releaseWakeLock();
+      stopKeepAlive();
+      updateMediaSession(false);
       return;
     }
     if (synth.paused) {
       try {
+        await startKeepAlive();
         synth.resume();
         isPlayingRef.current = true;
         setIsPlaying(true);
-        requestWakeLock();
+        updateMediaSession(true);
         return;
       } catch {}
     }
-    // start new queue
     try { synth.cancel(); } catch {}
-    // small delay to let cancel finish on some browsers
+    await startKeepAlive();
     setTimeout(() => {
       isPlayingRef.current = true;
       setIsPlaying(true);
       currentIdxRef.current = currentIdx;
+      updateMediaSession(true, currentIdx);
       speakAt(currentIdx, 0);
-      requestWakeLock();
     }, 60);
-  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, showToast, t]);
+  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, startKeepAlive, stopKeepAlive, updateMediaSession, showToast, t]);
 
   // Sync ref with state
   useEffect(() => { currentIdxRef.current = currentIdx; }, [currentIdx]);
@@ -717,6 +785,49 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [handlePlayPause]);
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    const ms = navigator.mediaSession;
+    try {
+      ms.setActionHandler('play', () => { if (!isPlayingRef.current) void handlePlayPause(); });
+      ms.setActionHandler('pause', () => { if (isPlayingRef.current) void handlePlayPause(); });
+      ms.setActionHandler('stop', () => stopSpeaking());
+      ms.setActionHandler('previoustrack', () => jumpTo(currentIdxRef.current - 1));
+      ms.setActionHandler('nexttrack', () => jumpTo(currentIdxRef.current + 1));
+      ms.setActionHandler('seekbackward', () => jumpTo(currentIdxRef.current - 1));
+      ms.setActionHandler('seekforward', () => jumpTo(currentIdxRef.current + 1));
+    } catch {}
+    return () => {
+      try {
+        ms.setActionHandler('play', null);
+        ms.setActionHandler('pause', null);
+        ms.setActionHandler('stop', null);
+        ms.setActionHandler('previoustrack', null);
+        ms.setActionHandler('nexttrack', null);
+        ms.setActionHandler('seekbackward', null);
+        ms.setActionHandler('seekforward', null);
+      } catch {}
+    };
+  }, [handlePlayPause, jumpTo, stopSpeaking]);
+
+  useEffect(() => {
+    const onVis = () => {
+      if (!isPlayingRef.current) return;
+      void startKeepAlive();
+      const synth = window.speechSynthesis;
+      try {
+        if (synth.paused) synth.resume();
+        else if (!synth.speaking) speakAt(currentIdxRef.current, 0);
+      } catch {}
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pageshow', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pageshow', onVis);
+    };
+  }, [startKeepAlive, speakAt]);
 
   // Before install prompt
   useEffect(() => {
@@ -940,6 +1051,7 @@ export default function App() {
 
   return (
     <div className="min-h-[100dvh] bg-[#fdf8f0] text-[#1a1a1a] flex flex-col selection:bg-[#ff6b35]/20">
+      <audio ref={keepAliveRef} loop playsInline className="hidden" />
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Manrope:wght@500;700&display=swap');
         .serif { font-family: 'Merriweather', Georgia, serif; }
@@ -1161,21 +1273,21 @@ export default function App() {
                 min={0}
                 max={Math.max(0, total-1)}
                 value={currentIdx}
-                onChange={e=>{ const v=parseInt(e.target.value); setCurrentIdx(v); currentIdxRef.current=v; if(isPlaying) { stopSpeaking(); setTimeout(()=>{ setCurrentIdx(v); }, 30);} }}
+                onChange={e=>{ jumpTo(parseInt(e.target.value, 10)); }}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
               />
             </div>
             <div className="flex items-center gap-2.5 md:gap-4 px-3 md:px-5 py-3.5 w-full max-w-full overflow-hidden">
-              <button type="button" onClick={()=>{ const firstInPrev = bookData.flatSentences.findLastIndex(s=> s.paraIdx < currentParaIdx); const target = firstInPrev>=0 ? firstInPrev : Math.max(0, currentIdx-1); setCurrentIdx(target); currentIdxRef.current=target; if(isPlaying) { stopSpeaking(); setTimeout(()=>speakAt(target,0), 80);} }} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
+              <button type="button" onClick={()=>{ const firstInPrev = bookData.flatSentences.findLastIndex(s=> s.paraIdx < currentParaIdx); jumpTo(firstInPrev>=0 ? firstInPrev : currentIdx-1); }} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
                 <Rewind size={18}/>
               </button>
-              <button type="button" onClick={()=>{ const prev = Math.max(0, currentIdx-1); setCurrentIdx(prev); currentIdxRef.current=prev; if(isPlaying) { stopSpeaking(); setTimeout(()=>speakAt(prev,0), 60);} }} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
+              <button type="button" onClick={()=>jumpTo(currentIdx-1)} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
                 <SkipBack size={18}/>
               </button>
               <button type="button" onClick={handlePlayPause} className="w-[56px] h-[56px] rounded-full bg-[#ff6b35] text-white grid place-items-center shadow-[0_6px_20px_rgba(255,107,53,0.5)] active:scale-95 transition shrink-0">
                 {isPlaying ? <Pause size={26} fill="white"/> : <Play size={26} fill="white" className="ml-[3px]"/>}
               </button>
-              <button type="button" onClick={()=>{ const next = Math.min(total-1, currentIdx+1); setCurrentIdx(next); currentIdxRef.current=next; if(isPlaying) { stopSpeaking(); setTimeout(()=>speakAt(next,0), 60);} }} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
+              <button type="button" onClick={()=>jumpTo(currentIdx+1)} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
                 <SkipForward size={18}/>
               </button>
 
