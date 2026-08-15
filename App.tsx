@@ -372,7 +372,7 @@ export default function App() {
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const isPlayingRef = useRef(false);
   const currentIdxRef = useRef(0);
-  const keepAliveRef = useRef<HTMLAudioElement | null>(null);
+  const wakeLockRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef2 = useRef<HTMLInputElement>(null);
   const readerContainerRef = useRef<HTMLDivElement>(null);
@@ -381,7 +381,6 @@ export default function App() {
   const preferredVoiceRef = useRef(selectedVoiceName);
   const activeBookIdRef = useRef('');
   const isDemoRef = useRef(true);
-  const ttsFailRef = useRef(0);
   const progressMapRef = useRef<Record<string, number>>({});
 
   const showToast = useCallback((msg: string) => {
@@ -539,33 +538,22 @@ export default function App() {
     } catch {}
   }, [hydrated, currentIdx, rate, selectedVoiceName, isDemo, bookName, activeBookId, progressMap]);
 
-  const stopKeepAlive = useCallback(() => {
-    const el = keepAliveRef.current;
-    if (!el) return;
+  // Wake lock
+  const requestWakeLock = async () => {
     try {
-      el.pause();
-      el.currentTime = 0;
+      // @ts-ignore
+      if (navigator.wakeLock) {
+        // @ts-ignore
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+      }
     } catch {}
-  }, []);
-
-  const updateMediaSession = useCallback((playing: boolean, idx = currentIdxRef.current) => {
-    if (!('mediaSession' in navigator)) return;
-    const sentences = bookData.flatSentences;
-    const sent = sentences[idx];
-    const chapter = bookData.chapters[sent?.chapterIdx ?? 0];
+  };
+  const releaseWakeLock = async () => {
     try {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: bookName || 'BookVoice',
-        artist: chapter?.title || 'BookVoice',
-        album: 'BookVoice',
-        artwork: [
-          { src: `${location.origin}/bookvoice-icon.png`, sizes: '192x192', type: 'image/png' },
-          { src: `${location.origin}/bookvoice-icon.png`, sizes: '512x512', type: 'image/png' },
-        ],
-      });
-      navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+      await wakeLockRef.current?.release();
+      wakeLockRef.current = null;
     } catch {}
-  }, [bookData.chapters, bookData.flatSentences, bookName]);
+  };
 
   // TTS core
   const stopSpeaking = useCallback(() => {
@@ -575,11 +563,8 @@ export default function App() {
     utteranceRef.current = null;
     isPlayingRef.current = false;
     setIsPlaying(false);
-    stopKeepAlive();
-    try {
-      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
-    } catch {}
-  }, [stopKeepAlive]);
+    releaseWakeLock();
+  }, []);
 
   const speakAt = useCallback((idx: number, attempt = 0) => {
     const sentences = bookData.flatSentences;
@@ -620,19 +605,18 @@ export default function App() {
     utter.pitch = 1;
     utter.volume = 1;
 
-    let failed = false;
     utter.onstart = () => {
-      ttsFailRef.current = 0;
       currentIdxRef.current = idx;
       setCurrentIdx(idx);
-      updateMediaSession(true, idx);
+      // highlight + scroll is handled by effect
     };
     utter.onend = () => {
-      if (failed || !isPlayingRef.current) return;
+      if (!isPlayingRef.current) return;
       const next = idx + 1;
       if (next < sentences.length) {
         currentIdxRef.current = next;
         setCurrentIdx(next);
+        // queue next sentence after small delay to avoid clipping
         setTimeout(() => speakAt(next, 0), 40);
       } else {
         stopSpeaking();
@@ -640,23 +624,20 @@ export default function App() {
       }
     };
     utter.onerror = (e: any) => {
+      console.error('TTS error', e);
       const err = e?.error || 'unknown';
       if (err === 'canceled' || err === 'interrupted') return;
-      failed = true;
-      console.error('TTS error', e);
-      if (!isPlayingRef.current) return;
-      ttsFailRef.current += 1;
-      if (ttsFailRef.current <= 3) {
-        setTimeout(() => {
-          if (!isPlayingRef.current) return;
-          speakAt(idx, Math.max(attempt, 1));
-        }, 350 * ttsFailRef.current);
-        return;
-      }
       showToast(t('ttsError', { err }));
-      isPlayingRef.current = false;
-      setIsPlaying(false);
-      updateMediaSession(false);
+      if (isPlayingRef.current) {
+        const next = idx + 1;
+        if (next < sentences.length) {
+          currentIdxRef.current = next;
+          setCurrentIdx(next);
+          setTimeout(() => speakAt(next, 0), 300);
+        } else {
+          stopSpeaking();
+        }
+      }
     };
     utteranceRef.current = utter;
     try {
@@ -667,34 +648,21 @@ export default function App() {
       showToast(t('ttsStartFailed'));
       stopSpeaking();
     }
-  }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast, t, updateMediaSession]);
+  }, [bookData.flatSentences, voices, selectedVoiceName, rate, stopSpeaking, showToast, t]);
 
-  const jumpTo = useCallback((idx: number) => {
-    const total = bookData.flatSentences.length;
-    if (!total) return;
-    const next = Math.max(0, Math.min(total - 1, idx));
-    const resume = isPlayingRef.current;
-    try { synthRef.current?.cancel(); } catch {}
-    setCurrentIdx(next);
-    currentIdxRef.current = next;
-    if (resume) {
-      isPlayingRef.current = true;
-      setIsPlaying(true);
-      setTimeout(() => speakAt(next, 0), 60);
-    }
-  }, [bookData.flatSentences.length, speakAt]);
-
-  const handlePlayPause = useCallback(() => {
+  const handlePlayPause = useCallback(async () => {
     if (!bookData.flatSentences.length) {
       showToast(t('loadBookFirst'));
       return;
     }
     const synth = window.speechSynthesis;
     synthRef.current = synth;
+    // MUST call getVoices after user gesture per spec
     const vs = synth.getVoices();
     if (vs.length) setVoices(vs);
 
     if (isPlayingRef.current && synth.speaking && !synth.paused) {
+      // pause playback
       try {
         synth.pause();
       } catch {
@@ -703,18 +671,29 @@ export default function App() {
       }
       isPlayingRef.current = false;
       setIsPlaying(false);
-      updateMediaSession(false);
+      releaseWakeLock();
       return;
     }
+    if (synth.paused) {
+      try {
+        synth.resume();
+        isPlayingRef.current = true;
+        setIsPlaying(true);
+        requestWakeLock();
+        return;
+      } catch {}
+    }
+    // start new queue
     try { synth.cancel(); } catch {}
-    ttsFailRef.current = 0;
-    stopKeepAlive();
-    isPlayingRef.current = true;
-    setIsPlaying(true);
-    currentIdxRef.current = currentIdx;
-    updateMediaSession(true, currentIdx);
-    speakAt(currentIdx, 0);
-  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, stopKeepAlive, updateMediaSession, showToast, t]);
+    // small delay to let cancel finish on some browsers
+    setTimeout(() => {
+      isPlayingRef.current = true;
+      setIsPlaying(true);
+      currentIdxRef.current = currentIdx;
+      speakAt(currentIdx, 0);
+      requestWakeLock();
+    }, 60);
+  }, [bookData.flatSentences.length, currentIdx, speakAt, stopSpeaking, showToast, t]);
 
   // Sync ref with state
   useEffect(() => { currentIdxRef.current = currentIdx; }, [currentIdx]);
@@ -738,56 +717,6 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [handlePlayPause]);
-
-  useEffect(() => {
-    if (!('mediaSession' in navigator)) return;
-    const ms = navigator.mediaSession;
-    try {
-      ms.setActionHandler('play', () => { if (!isPlayingRef.current) handlePlayPause(); });
-      ms.setActionHandler('pause', () => { if (isPlayingRef.current) handlePlayPause(); });
-      ms.setActionHandler('stop', () => stopSpeaking());
-      ms.setActionHandler('previoustrack', () => jumpTo(currentIdxRef.current - 1));
-      ms.setActionHandler('nexttrack', () => jumpTo(currentIdxRef.current + 1));
-      ms.setActionHandler('seekbackward', () => jumpTo(currentIdxRef.current - 1));
-      ms.setActionHandler('seekforward', () => jumpTo(currentIdxRef.current + 1));
-    } catch {}
-    return () => {
-      try {
-        ms.setActionHandler('play', null);
-        ms.setActionHandler('pause', null);
-        ms.setActionHandler('stop', null);
-        ms.setActionHandler('previoustrack', null);
-        ms.setActionHandler('nexttrack', null);
-        ms.setActionHandler('seekbackward', null);
-        ms.setActionHandler('seekforward', null);
-      } catch {}
-    };
-  }, [handlePlayPause, jumpTo, stopSpeaking]);
-
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (!isPlayingRef.current) return;
-      try { window.speechSynthesis.resume(); } catch {}
-    }, 10000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    const onVis = () => {
-      if (!isPlayingRef.current) return;
-      const synth = window.speechSynthesis;
-      try {
-        if (synth.paused) synth.resume();
-        else if (!synth.speaking) speakAt(currentIdxRef.current, 0);
-      } catch {}
-    };
-    document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('pageshow', onVis);
-    return () => {
-      document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('pageshow', onVis);
-    };
-  }, [speakAt]);
 
   // Before install prompt
   useEffect(() => {
@@ -1010,15 +939,7 @@ export default function App() {
   }, [voices]);
 
   return (
-    <div className="relative min-h-[100dvh] bg-[#fdf8f0] text-[#1a1a1a] flex flex-col selection:bg-[#ff6b35]/20">
-      <audio
-        ref={keepAliveRef}
-        src="/keepalive.wav"
-        loop
-        playsInline
-        preload="auto"
-        className="pointer-events-none absolute bottom-0 left-0 h-px w-px opacity-[0.01]"
-      />
+    <div className="min-h-[100dvh] bg-[#fdf8f0] text-[#1a1a1a] flex flex-col selection:bg-[#ff6b35]/20">
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Manrope:wght@500;700&display=swap');
         .serif { font-family: 'Merriweather', Georgia, serif; }
@@ -1240,21 +1161,21 @@ export default function App() {
                 min={0}
                 max={Math.max(0, total-1)}
                 value={currentIdx}
-                onChange={e=>{ jumpTo(parseInt(e.target.value, 10)); }}
+                onChange={e=>{ const v=parseInt(e.target.value); setCurrentIdx(v); currentIdxRef.current=v; if(isPlaying) { stopSpeaking(); setTimeout(()=>{ setCurrentIdx(v); }, 30);} }}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
               />
             </div>
             <div className="flex items-center gap-2.5 md:gap-4 px-3 md:px-5 py-3.5 w-full max-w-full overflow-hidden">
-              <button type="button" onClick={()=>{ const firstInPrev = bookData.flatSentences.findLastIndex(s=> s.paraIdx < currentParaIdx); jumpTo(firstInPrev>=0 ? firstInPrev : currentIdx-1); }} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
+              <button type="button" onClick={()=>{ const firstInPrev = bookData.flatSentences.findLastIndex(s=> s.paraIdx < currentParaIdx); const target = firstInPrev>=0 ? firstInPrev : Math.max(0, currentIdx-1); setCurrentIdx(target); currentIdxRef.current=target; if(isPlaying) { stopSpeaking(); setTimeout(()=>speakAt(target,0), 80);} }} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
                 <Rewind size={18}/>
               </button>
-              <button type="button" onClick={()=>jumpTo(currentIdx-1)} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
+              <button type="button" onClick={()=>{ const prev = Math.max(0, currentIdx-1); setCurrentIdx(prev); currentIdxRef.current=prev; if(isPlaying) { stopSpeaking(); setTimeout(()=>speakAt(prev,0), 60);} }} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
                 <SkipBack size={18}/>
               </button>
               <button type="button" onClick={handlePlayPause} className="w-[56px] h-[56px] rounded-full bg-[#ff6b35] text-white grid place-items-center shadow-[0_6px_20px_rgba(255,107,53,0.5)] active:scale-95 transition shrink-0">
                 {isPlaying ? <Pause size={26} fill="white"/> : <Play size={26} fill="white" className="ml-[3px]"/>}
               </button>
-              <button type="button" onClick={()=>jumpTo(currentIdx+1)} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
+              <button type="button" onClick={()=>{ const next = Math.min(total-1, currentIdx+1); setCurrentIdx(next); currentIdxRef.current=next; if(isPlaying) { stopSpeaking(); setTimeout(()=>speakAt(next,0), 60);} }} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 grid place-items-center active:scale-95 shrink-0">
                 <SkipForward size={18}/>
               </button>
 
